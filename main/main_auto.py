@@ -1,20 +1,3 @@
-'''
-\Description Using object detection and tracker to automatically label data
-\Brief Algorithm
-Step 1. Using Object Detection to find objects in the current frame
-        1.1 If do not detect any object in the frame, then skip this frame and GO BACK TO STEP 1 with next frame
-        1.2  If there is any found object in the frame, then SAVE label to files and GO TO STEP 2
-
-Step 2. Using trackers to track all found objects from Step 1.
-        2.1 If there is not tracker that miss to track object, then SAVE label to files and GO TO STEP 2
-        2.2 If there is any tracker that miss to track object, then GO TO STEP 1
-
-Note:
-    - All the classIds now based on the classIds of Object Detectors. Therefor, it is needed
-    a way to integerate with `class_list.txt`
-'''
-
-
 #!/bin/python
 import argparse
 import json
@@ -24,16 +7,18 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 from shutil import copyfile
+from datetime import datetime
+ 
 
 
-from lxml import etree
-import xml.etree.cElementTree as ET
 import sys
 sys.path.insert(0, "..")
 # from object_detection.tf_object_detection import ObjectDetector
 import configparser
 from siammask import SiamMask
 import torch
+from centernet_better.train import CenterNetBetterModule
+
 
 # load class list
 def nonblank_lines(f):
@@ -44,6 +29,10 @@ def nonblank_lines(f):
 
 with open('class_list.txt') as f:
     CLASS_LIST = list(nonblank_lines(f))
+CLASSES_INDEX = {}
+for i in range(len(CLASS_LIST)):
+    CLASSES_INDEX[CLASS_LIST[i]] = i
+
 #print(CLASS_LIST)
 last_class_index = len(CLASS_LIST) - 1
 
@@ -62,6 +51,9 @@ parser = argparse.ArgumentParser(description='Open-source image labeling tool')
 parser.add_argument('-i', '--input_dir', default='input', type=str, help='Path to input directory')
 parser.add_argument('-o', '--output_dir', default='output', type=str, help='Path to output directory')
 parser.add_argument('-t', '--thickness', default='1', type=int, help='Bounding box and cross line thickness')
+parser.add_argument('--detector', default='../object_detection/crow/epoch=46-step=17342.ckpt', type=str, help='Detector checkpoint dir')
+parser.add_argument('--tracker', default='SiamMask', type=str, help="tracker_type being used: ['SiamMask']")
+
 args = parser.parse_args()
 
 class_index = 0
@@ -95,14 +87,13 @@ mouse_y = 0
 point_1 = (-1, -1)
 point_2 = (-1, -1)
 
-model = "../object_detection/efficientdet/trained_models/signatrix_efficientdet_coco.pth"
+
+model = args.detector
 if torch.cuda.is_available():
-    detector = torch.load(model).module
-    model.cuda()
+    detector = CenterNetBetterModule.load_from_checkpoint(model, pretrained_checkpoints_path=None)
+    detector = detector.cuda()
 else:
     detector = torch.load(model,map_location='cpu').module
-
-
 
 
 def display_text(text, time):
@@ -113,7 +104,10 @@ def display_text(text, time):
 
 def set_img_index(x):
     global img_index, img
+    global is_last_frame
     img_index = x
+    if img_index < last_index:
+        is_last_frame = False
     img_path = IMAGE_PATH_LIST[img_index]
     img = cv2.imread(img_path)
     text = 'Showing image {}/{}, path: {}'.format(str(img_index), str(last_img_index), img_path)
@@ -318,21 +312,28 @@ def get_annotation_paths(img_path, annotation_formats):
 
 
 
-def read_darklabel_file(file_dir,img_path):
-    frame_number = img_path.split('_')[-1].replace('.jpg','')
+def read_darklabel_file(file_dir,video_name):
+    # frame_number = img_path.split('_')[-1].replace('.jpg','')
     f = open(file_dir,'r')
     relevant_objs = []
-
+    
     for line in f:
         objs = line.split('\n')[0].split(',')
-        if int(objs[0]) == int(frame_number):
-            frame_number = objs.pop(0)
-            class_name = objs.pop(-1)
-            objs = list(map(int, objs))
-            objs.append(class_name)
-            relevant_objs.append(objs)
+        # if int(objs[0]) == int(frame_number):
+        frame_number = objs.pop(0)
+        class_name = objs.pop(-1)
+        objs = list(map(int, objs))
+        objs.append(CLASSES_INDEX[class_name])
+        objs.append(class_name)
+        relevant_objs.append(objs)
+        key = video_name+frame_number+'.jpg'
+        if labeling_file.get(key,None) == None:
+            labeling_file[key] = [objs]
+        else:
+            labeling_file[key].append(objs)
+        # labeling_file[]
     # curr_anchor_id = max(relevant_objs,key=lambda o: o[0])
-    return relevant_objs
+    # return relevant_objs
 
 def update_bounding_box(frame_path,anchor_id,class_index,xmin,ymin,xmax,ymax):
     w= abs(xmax-xmin)
@@ -355,13 +356,17 @@ def save_darklabel_txt(labeling_file_dir):
             nested_list = any(isinstance(i, list) for i in objs)
             if nested_list:
                 for obj in objs:
+                    index = obj.pop(-2)
                     output_line = frame_number + ',' + ','.join(str(e) for e in obj)
+                    obj.insert(-1,index)
                     f.write(output_line)
                     f.write("\n")
             else:
                 if objs == []:
                     continue
+                index = objs.pop(-2)
                 output_line = frame_number + ',' + ','.join(str(e) for e in objs)
+                objs.insert(-1,index)
                 f.write(output_line)
                 f.write("\n")
 
@@ -384,18 +389,7 @@ def get_json_file_data(json_file_path):
     else:
         return False, {'n_anchor_ids':0, 'frame_data_dict':{}}
 
-def update_json_anchor_id():
-    is_from_video, video_name = is_frame_from_video(img_path)
-    if is_from_video:
-        # get list of objects associated to that frame
-        object_list = img_objects[:]
-        # remove the objects in that frame that are already in the `.json` file
-        json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, video_name))
-        if os.path.isfile(json_file_path):
-            with open(json_file_path) as f:
-                data = json.load(f)
-                anchor_id = data['n_anchor_ids']
-                data.update({'n_anchor_ids': (anchor_id + 1)})
+
 
 
 
@@ -434,7 +428,7 @@ def get_json_object_dict_percent(obj, json_object_list):
         obj.append(class_name)
         for d in json_object_list:
                     if ( d['class_index'] == class_index and
-                         overlap_percent(obj,d))>0.4 :
+                         overlap_percent(obj,d))>0.1 :
                         return d
     return None
 
@@ -476,6 +470,45 @@ def overlap_percent_bbox(obj1,obj2):
     SU = SA+SB-SI
 
     return SI/SU
+
+def get_iou(obj1,obj2):
+    """
+    Calculate the Intersection over Union (IoU) of two bounding boxes.
+
+    Returns
+    -------
+    float
+        in [0, 1]
+    """
+    assert bb1['x1'] < bb1['x2']
+    assert bb1['y1'] < bb1['y2']
+    assert bb2['x1'] < bb2['x2']
+    assert bb2['y1'] < bb2['y2']
+
+    # determine the coordinates of the intersection rectangle
+    x_left = max(bb1['x1'], bb2['x1'])
+    y_top = max(bb1['y1'], bb2['y1'])
+    x_right = min(bb1['x2'], bb2['x2'])
+    y_bottom = min(bb1['y2'], bb2['y2'])
+
+    if x_right < x_left or y_bottom < y_top:
+        return 0.0
+
+    # The intersection of two axis-aligned bounding boxes is always an
+    # axis-aligned bounding box
+    intersection_area = (x_right - x_left) * (y_bottom - y_top)
+
+    # compute the area of both AABBs
+    bb1_area = (bb1['x2'] - bb1['x1']) * (bb1['y2'] - bb1['y1'])
+    bb2_area = (bb2['x2'] - bb2['x1']) * (bb2['y2'] - bb2['y1'])
+
+    # compute the intersection over union by taking the intersection
+    # area and dividing it by the sum of prediction + ground-truth
+    # areas - the interesection area
+    iou = intersection_area / float(bb1_area + bb2_area - intersection_area)
+    assert iou >= 0.0
+    assert iou <= 1.0
+    return iou
 
 def get_json_file_object_by_id(json_object_list, anchor_id):
     for obj_dict in json_object_list:
@@ -559,6 +592,25 @@ class Tracker:
                 tracker = cv2.TrackerGOTURN_create()
         return tracker
 
+
+def set_max_anchor():
+    global curr_anchor_id
+    max_anchor = 0
+    for k in labeling_file.keys():
+        objs = labeling_file[k]
+        nested_list = any(isinstance(i, list) for i in objs)
+        if nested_list:
+            for idx,obj in enumerate(objs):
+                if obj[0]>max_anchor:
+                    max_anchor=obj[0]
+        else:
+            if objs == []:
+                continue
+            if objs[0]>max_anchor:
+                max_anchor=objs[0]
+
+    curr_anchor_id=max_anchor+1
+
 '''
 \brief This is class to manage all the trackers
        This class will check if there is any "miss" tracker in current(init) frame:
@@ -574,7 +626,7 @@ class TrackerManager:
     # TODO: press ESC to stop the tracking process
 
     def __init__(self, tracker_type, init_frame, next_frame_path_list):
-        tracker_types = ['CSRT', 'KCF','MOSSE', 'MIL', 'BOOSTING', 'MEDIANFLOW', 'TLD', 'GOTURN', 'DASIAMRPN','SiamMask']
+        tracker_types = ['SiamMask']
         ''' Recomended tracker_type:
               KCF -> KCF is usually very good (minimum OpenCV 3.1.0)
               CSRT -> More accurate than KCF but slightly slower (minimum OpenCV 3.4.2)
@@ -600,15 +652,15 @@ class TrackerManager:
     '''
     def init_trackers(self, bboxes, classIds, json_file_data,json_file_path, img_path):
         global img_index
+        global curr_anchor_id
 
-        anchor_id = json_file_data['n_anchor_ids']
+        # anchor_id = json_file_data['n_anchor_ids']
+        anchor_id = curr_anchor_id
         frame_data_dict = json_file_data['frame_data_dict']
         image = cv2.imread(img_path)
         # iii=0
         for box, classId in zip(bboxes, classIds):
-            # print(f"new tracker {iii}")
-            # iii+=1
-            # Init trackers with those classId and anchorId
+
             anchor_id = anchor_id + 1
             if self.tracker_type == 'SiamMask':
                 
@@ -635,7 +687,7 @@ class TrackerManager:
             annotation_paths = get_annotation_paths(img_path, annotation_formats)
             # save_bounding_box(annotation_paths, int(classId), (xmin, ymin), (xmax, ymax), self.img_w, self.img_h)
             update_bounding_box(img_path,anchor_id,int(classId),xmin,ymin,xmax,ymax)
-
+            
 
 
             #Draw
@@ -648,6 +700,7 @@ class TrackerManager:
         cv2.imshow(WINDOW_NAME, image)
         pressed_key = cv2.waitKey(DELAY)
 
+        curr_anchor_id= anchor_id
         json_file_data.update({'n_anchor_ids': (anchor_id + 1)})
 
         # save the updated data
@@ -658,16 +711,23 @@ class TrackerManager:
 
     def predict_next_frames(self,json_file_data,json_file_path):
         global img_index
+        global curr_anchor_id
 
-        anchor_id = json_file_data['n_anchor_ids']
+        # anchor_id = json_file_data['n_anchor_ids']
+        anchor_id = curr_anchor_id
         frame_data_dict = json_file_data['frame_data_dict']
 
         pred_counter = 0
+        
         for frame_path in self.next_frame_path_list:
             is_there_missed_tracker = False
             bboxes = []
+            misses = []
+            errors = []
+            if len(self.trackers)==0:
+                break
             # Check if there is any "miss" tracker
-            for tracker in self.trackers:
+            for t,tracker in enumerate(self.trackers):
                 next_image = cv2.imread(frame_path)
                 if self.tracker_type=='SiamMask':
                     success, bbox  = tracker.update(next_image.copy())
@@ -675,9 +735,15 @@ class TrackerManager:
                     success, bbox = tracker.instance.update(next_image.copy())
                 bboxes.append(bbox)
                 if not success:
-                    is_there_missed_tracker = True
-                    break
-
+                    is_there_missed_tracker = False
+                    # break
+                    misses.append(t)
+            if len(misses)>0:
+                # for m in misses:
+                #     bboxes.pop(m)
+                #     self.trackers.pop(m)
+                bboxes = [i for j, i in enumerate(bboxes) if j not in misses]
+                self.trackers = [i for j, i in enumerate(self.trackers) if j not in misses]
             # if there is no "miss" tracker, then save labelled objects into files and keep predict at the next frame
             if not is_there_missed_tracker:
                 pred_counter += 1
@@ -685,6 +751,9 @@ class TrackerManager:
                     box = bboxes[i]
 
                     xmin, ymin, w, h = map(int, box)
+                    if xmin<0 or ymin<0:
+                        errors.append(i)
+                        continue
                     xmax = xmin + w
                     ymax = ymin + h
                     # obj = [int(tracker.classId), xmin, ymin, xmax, ymax]
@@ -706,59 +775,25 @@ class TrackerManager:
                 img_index = increase_index(img_index, last_img_index)
 
                 cv2.setTrackbarPos(TRACKBAR_IMG, WINDOW_NAME, img_index)
+            if len(errors)>0:
+                # for e in errors:
+                #     bboxes.pop(e)
+                #     self.trackers.pop(e)
+                bboxes = [i for j, i in enumerate(bboxes) if j not in errors]
+                self.trackers = [i for j, i in enumerate(self.trackers) if j not in errors]
             # If there is "miss" traker, then break Tracker Manager.
             # Note:Ready to use "Object Detection" to detect object
-            else:
-                break
+            # else:
+            #     break
 
-        json_file_data.update({'n_anchor_ids': (anchor_id + 1)})
+        # json_file_data.update({'n_anchor_ids': (anchor_id + 1)})
+        # curr_anchor_id +=1
         # save the updated data
         with open(json_file_path, 'w') as outfile:
             json.dump(json_file_data, outfile, sort_keys=True, indent=4)
         save_darklabel_txt(labeling_file_dir)
 
-    def predict_next_frames2(self,json_file_data,json_file_path):
-        global img_index
-
-        anchor_id = json_file_data['n_anchor_ids']
-        frame_data_dict = json_file_data['frame_data_dict']
-
-        pred_counter = 0
-        for data in self.tracker_data:
-            tracker = SiamMask(anchorid=data[0], classid=data[1],init_frame=data[2],init_bbox=data[3])
-            tracker.init_reinit()
-            bboxes = []
-            frame_paths = []
-            for frame_path in self.next_frame_path_list:
-                
-                # Check if there is any "miss" tracker
-                next_image = cv2.imread(frame_path)
-                success, bbox  = tracker.update(next_image.copy())
-                if success:
-                    pred_counter += 1
-                    # xmin, ymin, w, h = map(int, bbox)
-                    xmin,ymin,w,h=bbox
-                    xmax = xmin + w
-                    ymax = ymin + h
-                    obj = [class_index, xmin, ymin, xmax, ymax]
-                    frame_data_dict = json_file_add_object(frame_data_dict, frame_path, anchor_id, pred_counter, obj)
-                    cv2.rectangle(next_image, (xmin, ymin), (xmax, ymax), color, LINE_THICKNESS)
-                    # save prediction
-                    annotation_paths = get_annotation_paths(frame_path, annotation_formats)
-                    save_bounding_box(annotation_paths, class_index, (xmin, ymin), (xmax, ymax), self.img_w, self.img_h)
-                    # show prediction
-                    cv2.imshow(WINDOW_NAME, next_image)
-                    pressed_key = cv2.waitKey(DELAY)
-                else:
-                    break
-            del tracker
-
-            json_file_data.update({'n_anchor_ids': (anchor_id + 1)})
-            # save the updated data
-            with open(json_file_path, 'w') as outfile:
-                json.dump(json_file_data, outfile, sort_keys=True, indent=4)
-
-
+    
 # change to the directory of this script
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -812,18 +847,20 @@ if len(VIDEO_NAME_DICT) > 0:
                 open(labeling_file_dir, 'a').close()
             else:
                 copyfile(labeling_file_dir, labeling_file_dir[:-4]+'_backup.txt')
-                for img_path in IMAGE_PATH_LIST:
-                    labeling_file[img_path] = read_darklabel_file(labeling_file_dir,img_path)
-                # set_max_anchor()
+                first_element = IMAGE_PATH_LIST[0]
+                ending = IMAGE_PATH_LIST[0].split('_')[-1]
+                root_name = first_element.replace(ending,'')
+                read_darklabel_file(labeling_file_dir,root_name)
+                set_max_anchor()
 
 # create empty annotation files for each image, if it doesn't exist already
-for img_path in IMAGE_PATH_LIST:
-    # image info for the .xml file
-    test_img = cv2.imread(img_path)
-    abs_path = os.path.abspath(img_path)
-    folder_name = os.path.dirname(img_path)
-    image_name = os.path.basename(img_path)
-    img_height, img_width, depth = (str(number) for number in test_img.shape)
+# for img_path in IMAGE_PATH_LIST:
+#     # image info for the .xml file
+#     test_img = cv2.imread(img_path)
+#     abs_path = os.path.abspath(img_path)
+#     folder_name = os.path.dirname(img_path)
+#     image_name = os.path.basename(img_path)
+#     img_height, img_width, depth = (str(number) for number in test_img.shape)
 
     
 # load class list
@@ -863,15 +900,24 @@ display_text('Welcome!\n Press [h] for help.', 4000)
 
 # loop
 new_track = False
+print(datetime.now())
 while True:
+    if img_index >= last_index:
+        is_last_frame = True
+
     if is_last_frame and new_track:
         print("Reach to the last frame!!!!")
         new_track = False
         is_last_frame = False
-        set_img_index(0)
-        continue
+        # set_img_index(0)
+        # continue
+        print(datetime.now())
+
+        break
     elif is_last_frame:
         print("Reach to the last frame!!!!")
+        print(datetime.now())
+
         break
 
     color = class_rgb[class_index].tolist()
@@ -909,10 +955,11 @@ while True:
     # boxes, confidences, classIds =  detector.detect(im_rgb)
     image_size = 1024
     height, width = im_rgb.shape[:2]
-    image = im_rgb.astype(np.float32) / 255
-    image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
-    image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
-    image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
+    image = im_rgb.astype(np.float32)
+    # image = im_rgb.astype(np.float32) / 255
+    # image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
+    # image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
+    # image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
     if height > width:
         scale = image_size / height
         resized_height = image_size
@@ -932,13 +979,17 @@ while True:
     if torch.cuda.is_available():
         new_image = new_image.cuda()
     with torch.no_grad():
-        confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
+        y = detector([{'image': new_image.squeeze()}], is_training=False)[0]
+        confidences = y['instances'].get('scores')
+        classIds = y['instances'].get('pred_classes')
+        boxes = y['instances'].get('pred_boxes').tensor
+        # confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
         boxes /= scale
     boxes[:,2]=boxes[:,2]-boxes[:,0] # we need x y w h
     boxes[:,3]=boxes[:,3]-boxes[:,1]
-    boxes=boxes[confidences>0.7].cpu() 
-    classIds=classIds[confidences>0.7].cpu()
-    confidences=confidences[confidences>0.7].cpu()
+    boxes=boxes[confidences>0.4].cpu() 
+    classIds=classIds[confidences>0.4].cpu()
+    confidences=confidences[confidences>0.4].cpu()
 
     # new_boxes = boxes[:,:]
 
@@ -978,8 +1029,9 @@ while True:
                 object_list = remove_already_tracked_objects(object_list, img_path, json_file_data)
             if len(object_list) > 0:
                 new_track =True
+                return_to_index = img_index
                 print("Using tracker!!!!")
-                tracker_manager = TrackerManager('SiamMask', init_frame, next_frame_path_list)
+                tracker_manager = TrackerManager(args.tracker, init_frame, next_frame_path_list)
                 new_boxes_max = np.asarray([object_[1:5] for object_ in object_list])
                 new_classIds = [object_[-2] for object_ in object_list]
 
@@ -990,6 +1042,8 @@ while True:
                 # I have to restructure this, instead of initation 100s of trackers and then predicting
                 tracker_manager.init_trackers(new_boxes, new_classIds, json_file_data, json_file_path, current_img_path)
                 tracker_manager.predict_next_frames(json_file_data,json_file_path)
+                # json_file_data['n_anchor_ids']-=2
+                set_img_index(return_to_index)
             else:
                 img_index = increase_index(img_index, last_img_index)
                 cv2.setTrackbarPos(TRACKBAR_IMG, WINDOW_NAME, img_index)
