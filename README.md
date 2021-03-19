@@ -107,7 +107,7 @@ Video:
 | x | stop tracking |
 
 Mouse:
-<img src="https://github.com/kochsebastian/AutoLabeling/blob/master/object_interaction.jpg">
+<img src="https://github.com/kochsebastian/AutoLabeling/blob/master/object_interaction.png">
   - To create a bounding box do a left click for the top left corner and do a left click for the bottom right corner 
   - Use right click on object to quick delete
   - Use mouse wheel to zoom in and out
