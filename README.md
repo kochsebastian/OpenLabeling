@@ -1,11 +1,8 @@
-# OpenLabeling: open-source image and video labeler
+# AutoLabeling: open-source image and video labeler
 
-[![GitHub stars](https://img.shields.io/github/stars/Cartucho/OpenLabeling.svg?style=social&label=Stars)](https://github.com/Cartucho/OpenLabeling)
+This is a more advanced version of OpenLabeling. Improvements include a build in object detector to quickly label known objects, an advanced and more stable tracker for tracking labeled objects over a long time, and build-in automated track-id generation to keep track of individual objects.
 
-Image labeling in multiple annotation formats:
-- PASCAL VOC (= [darkflow](https://github.com/thtrieu/darkflow))
-- [YOLO darknet](https://github.com/pjreddie/darknet)
-- ask for more (create a new issue)...
+Documentation under construction!
 
 <img src="https://media.giphy.com/media/l49JDgDSygJN369vW/giphy.gif" width="40%"><img src="https://media.giphy.com/media/3ohc1csRs9PoDgCeuk/giphy.gif" width="40%">
 <img src="https://media.giphy.com/media/3o752fXKwTJJkhXP32/giphy.gif" width="40%"><img src="https://media.giphy.com/media/3ohc11t9auzSo6fwLS/giphy.gif" width="40%">

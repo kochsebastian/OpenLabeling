@@ -1,19 +1,19 @@
 #!/bin/python
 import argparse
 import glob
-import json
+import json, orjson, ujson
 import os
 import re
-
+import time
 import cv2
 import numpy as np
 from tqdm import tqdm
 from shutil import copyfile
 import torch
+from centernet_better.train import CenterNetBetterModule
+import tkinter as tk
+import sys
 
-
-from lxml import etree
-import xml.etree.cElementTree as ET
 
 # load class list
 def nonblank_lines(f):
@@ -24,6 +24,11 @@ def nonblank_lines(f):
 
 with open('class_list.txt') as f:
     CLASS_LIST = list(nonblank_lines(f))
+
+CLASSES_INDEX = {}
+for i in range(len(CLASS_LIST)):
+    CLASSES_INDEX[CLASS_LIST[i]] = i
+
 #print(CLASS_LIST)
 last_class_index = len(CLASS_LIST) - 1
 
@@ -37,30 +42,24 @@ except cv2.error:
     print('-> Please ignore this error message\n')
 cv2.destroyAllWindows()
 
-
+VIDEO_PATH = ''
+CAPTURE = None
+to_track_objects = []
 
 parser = argparse.ArgumentParser(description='Open-source image labeling tool')
 parser.add_argument('-i', '--input_dir', default='input', type=str, help='Path to input directory')
 parser.add_argument('-o', '--output_dir', default='output', type=str, help='Path to output directory')
-parser.add_argument('-t', '--thickness', default='1', type=int, help='Bounding box and cross line thickness')
-# parser.add_argument('--draw-from-PASCAL-files', action='store_true', help='Draw bounding boxes from the PASCAL files') # default YOLO
-'''
-tracker_types = ['CSRT', 'KCF','MOSSE', 'MIL', 'BOOSTING', 'MEDIANFLOW', 'TLD', 'GOTURN', 'DASIAMRPN']
-    Recomended tracker_type:
-        DASIAMRPN -> best
-        KCF -> KCF is usually very good (minimum OpenCV 3.1.0)
-        CSRT -> More accurate than KCF but slightly slower (minimum OpenCV 3.4.2)
-        MOSSE -> Less accurate than KCF but very fast (minimum OpenCV 3.4.1)
-'''
-parser.add_argument('--tracker', default='KCF', type=str, help="tracker_type being used: ['CSRT', 'KCF','MOSSE', 'MIL', 'BOOSTING', 'MEDIANFLOW', 'TLD', 'GOTURN', 'DASIAMRPN', 'SiamMask']")
-parser.add_argument('-n', '--n_frames', default='200', type=int, help='number of frames to track object for')
-parser.add_argument('-d', '--detector', default='../object_detection/efficientdet/trained_models/signatrix_efficientdet_coco.pth', type=str, help='Detector model dir')
+parser.add_argument('-t', '--thickness', default='2', type=int, help='Bounding box and cross line thickness')
+
+parser.add_argument('--tracker', default='SiamMask', type=str, help="tracker_type being used: ['SiamMask']")
+parser.add_argument('-n', '--n_frames', default='10000000', type=int, help='number of frames to track object for')
+parser.add_argument('--detector', default='../object_detection/crow/epoch=46-step=17342.ckpt', type=str, help='Detector checkpoint dir')
 args = parser.parse_args()
 
 model = args.detector
 if torch.cuda.is_available():
-    detector = torch.load(model).module
-    model.cuda()
+    detector = CenterNetBetterModule.load_from_checkpoint(model, pretrained_checkpoints_path=None)
+    detector = detector.cuda()
 else:
     detector = torch.load(model,map_location='cpu').module
 
@@ -68,6 +67,10 @@ class_index = 0
 img_index = 0
 img = None
 img_objects = []
+show_curr_tracked = False
+current_data = None
+non_track_objects = []
+redo_tracking_objects = []
 
 INPUT_DIR  = args.input_dir
 OUTPUT_DIR = args.output_dir
@@ -94,6 +97,7 @@ curr_anchor_id = 0
 
 # selected bounding box
 prev_was_double_click = False
+prev_was_triple_click = False
 is_bbox_selected = False
 selected_bbox = -1
 LINE_THICKNESS = args.thickness
@@ -227,6 +231,10 @@ def set_img_index(x):
     img_index = x
     img_path = IMAGE_PATH_LIST[img_index]
     img = cv2.imread(img_path)
+    
+    # CAPTURE.set(cv2.CAP_PROP_POS_FRAMES,img_index)
+    # _,img = CAPTURE.read()
+
     text = 'Showing image {}/{}, path: {}'.format(str(img_index), str(last_img_index), img_path)
     display_text(text, 1000)
 
@@ -314,7 +322,7 @@ def draw_bbox_anchors(tmp_img, xmin, ymin, xmax, ymax, color):
         cv2.rectangle(tmp_img, (int(x1), int(y1)), (int(x2), int(y2)), color, -1)
     return tmp_img
 
-def draw_bboxes_from_dict(tmp_img, img_path, width, height):
+def draw_bboxes_from_dict(tmp_img, img_path, width=0, height=0):
     global img_objects, is_bbox_selected, selected_bbox
     img_objects = []
     ann_path = None
@@ -328,7 +336,8 @@ def draw_bboxes_from_dict(tmp_img, img_path, width, height):
             for idx,obj in enumerate(objs):
                 if len(obj)==0:
                     continue
-                anchor_id,xmin, ymin, w, h, class_index, class_name = obj
+                anchor_id,xmin, ymin, w, h, class_index,class_name = obj
+                # class_index = CLASSES_INDEX[class_name]
                 # class_name = CLASS_LIST[class_index]
                 xmax = xmin+w
                 ymax = ymin+h
@@ -403,6 +412,23 @@ def is_mouse_inside_delete_button():
                 return True
     return False
 
+def is_mouse_inside_tracked_button():
+    for idx, obj in enumerate(img_objects):
+        if idx == selected_bbox:
+            anchor_id, x1, y1, x2, y2,class_id,class_name = obj
+            x1_c, y1_c, x2_c, y2_c = get_tracked_icon(x1, y1, x2, y2)
+            if pointInRect(mouse_x, mouse_y, x1_c, y1_c, x2_c, y2_c):
+                return True
+    return False
+
+def inside_bbox(x, y, bbox):
+    x1, y1, w, h = bbox
+    x2, y2 = x1+w, y1+h
+    if (x1 < x and x < x2):
+        if (y1 < y and y < y2):
+            return True
+    return False
+
 
 def edit_bbox(obj_to_edit, action):
     ''' action = `delete`
@@ -413,6 +439,8 @@ def edit_bbox(obj_to_edit, action):
     global curr_anchor_id
     if 'change_class' in action:
         new_class_index = int(action.split(':')[1])
+    elif 'change_trackid' in action:
+        new_trackid = int(action.split(':')[1])
     elif 'resize_bbox' in action:
         new_x_left = max(0, int(action.split(':')[1]))
         new_y_top = max(0, int(action.split(':')[2]))
@@ -458,17 +486,19 @@ def edit_bbox(obj_to_edit, action):
                 # update json file if contain the same anchor_id
                 for frame_path in frame_path_list:
                     json_object_list = get_json_file_object_list(frame_path, frame_data_dict)
-                    if 'delete_recursive' in action and int(img_path.split('_')[-1].replace('.jpg',''))>=int(current_img_path.split('_')[-1].replace('.jpg','')):
+                    if (('delete_recursive' in action or 'change_class' in action or 'change_trackid' in action) 
+                            and int(img_path.split('_')[-1].replace('.jpg',''))>=int(current_img_path.split('_')[-1].replace('.jpg',''))):
                         json_obj = get_json_file_object_by_id(json_object_list, anchor_id) 
                     else:
                         json_obj = get_json_file_object_by_exact_dicription(json_object_list, obj_matched)
                     if json_obj is not None:
-      
                         # edit json file
                         if 'delete' in action:
                             json_object_list.remove(json_obj)
                         elif 'change_class' in action:
                             json_obj['class_index'] = new_class_index
+                        elif 'change_trackid' in action:
+                            json_obj['anchor_id'] = new_trackid
                         elif 'resize_bbox' in action:
                             json_obj['bbox']['xmin'] = new_x_left
                             json_obj['bbox']['ymin'] = new_y_top
@@ -476,10 +506,11 @@ def edit_bbox(obj_to_edit, action):
                             json_obj['bbox']['ymax'] = new_y_bottom
                     else:
                         break
-
+                # super slow 
                 # save the edited data
-                with open(json_file_path, 'w') as outfile:
-                    json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                # with open(json_file_path, 'w') as outfile:
+                #     json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                #     json.dump(json_file_data, outfile, sort_keys=True, indent=4)
 
     # 3. loop through bboxes_to_edit_dict and edit the corresponding annotation files
     for path in bboxes_to_edit_dict:
@@ -492,10 +523,25 @@ def edit_bbox(obj_to_edit, action):
         nested_list = any(isinstance(d, list) for d in labeling_file[current_img_path])
         
         if 'delete_recursive' in action:
-            for frame in frame_path_list:
-                labeling_file[frame].pop(selected_bbox)
-                if labeling_file[frame]==[]:
-                    del labeling_file[frame]
+            labeling_file[current_img_path].pop(selected_bbox)
+            if labeling_file[current_img_path]==[]:
+                del labeling_file[current_img_path]
+            next_frames = get_next_frame_path_list(video_name, current_img_path)
+            for frame in next_frames:
+                delete_index=-1
+                for i,obj in enumerate(labeling_file[frame]):
+                # continue_delete = False
+                    if obj[0] == anchor_id:
+                        delete_index = i
+                        break
+                if delete_index !=-1:
+                    if labeling_file[frame][delete_index][0] == anchor_id:
+                        labeling_file[frame].pop(delete_index)
+                        if labeling_file[frame]==[]:
+                            del labeling_file[frame]
+                else:
+                    break
+                
         elif 'delete' in action:
             labeling_file[current_img_path].pop(selected_bbox)
             if labeling_file[current_img_path]==[]:
@@ -504,9 +550,39 @@ def edit_bbox(obj_to_edit, action):
 
         elif 'change_class' in action:
             if nested_list:
-                labeling_file[current_img_path][selected_bbox]= [curr_anchor_id,xmin,ymin,w,h,new_class_index,CLASS_LIST[new_class_index]]
+                labeling_file[current_img_path][selected_bbox] = [curr_anchor_id,xmin,ymin,w,h,new_class_index,CLASS_LIST[new_class_index]]
             else:
                 labeling_file[current_img_path]= [curr_anchor_id,xmin,ymin,w,h,new_class_index,CLASS_LIST[new_class_index]]
+            next_frames = get_next_frame_path_list(video_name, current_img_path)
+            for frame in next_frames:
+                if nested_list:
+                    if labeling_file.get(frame,None)!=None:
+                        for i in range(len(labeling_file[frame])):
+                            if labeling_file[frame][i][0] == anchor_id:
+                                next_anchor_id,next_xmin,next_ymin,next_w,next_h,next_classid, next_class_name = labeling_file[frame][i]
+                                labeling_file[frame][i] = [curr_anchor_id,next_xmin,next_ymin,next_w,next_h,new_class_index,CLASS_LIST[new_class_index]]
+                else:
+                    if labeling_file[frame][0]==anchor_id:
+                        next_anchor_id,next_xmin,next_ymin,next_w,next_h,next_classid, next_class_name = labeling_file[frame]
+                        labeling_file[frame]= [curr_anchor_id,next_xmin,next_ymin,next_w,next_h,new_class_index,CLASS_LIST[new_class_index]]
+            curr_anchor_id+=1
+        elif 'change_trackid' in action:
+            if nested_list:
+                labeling_file[current_img_path][selected_bbox] = [new_trackid,xmin,ymin,w,h,CLASSES_INDEX[class_name],class_name]
+            else:
+                labeling_file[current_img_path]= [new_trackid,xmin,ymin,w,h,CLASSES_INDEX[class_name],class_name]
+            next_frames = get_next_frame_path_list(video_name, current_img_path)
+            for frame in next_frames:
+                if nested_list:
+                    if labeling_file.get(frame,None)!=None:
+                        for i in range(len(labeling_file[frame])):
+                            if labeling_file[frame][i][0] == anchor_id:
+                                next_anchor_id,next_xmin,next_ymin,next_w,next_h,next_classid, next_class_name = labeling_file[frame][i]
+                                labeling_file[frame][i] = [new_trackid,next_xmin,next_ymin,next_w,next_h,next_classid,next_class_name]
+                else:
+                    if labeling_file[frame][0]==anchor_id:
+                        next_anchor_id,next_xmin,next_ymin,next_w,next_h,next_classid, next_class_name = labeling_file[frame]
+                        labeling_file[frame]= [new_trackid,next_xmin,next_ymin,next_w,next_h,next_classid,next_class_name]
             curr_anchor_id+=1
         elif 'resize_bbox' in action:
             new_w = abs(new_x_left-new_x_right)
@@ -515,70 +591,103 @@ def edit_bbox(obj_to_edit, action):
                 labeling_file[current_img_path][selected_bbox]= [anchor_id,new_x_left,new_y_top,new_w,new_h,class_index,class_name]
             else:
                 labeling_file[current_img_path] = [anchor_id,new_x_left,new_y_top,new_w,new_h,class_index,class_name]
-    save_darklabel_txt(labeling_file_dir)
+    # save_darklabel_txt(labeling_file_dir)
 
             
 
 
 
 def mouse_listener(event, x, y, flags, param):
-    # mouse callback function
-    global is_bbox_selected, prev_was_double_click, mouse_x, mouse_y, point_1, point_2
+    try:
+        # mouse callback function
+        global is_bbox_selected, prev_was_double_click, prev_was_triple_click, mouse_x, mouse_y, point_1, point_2
 
-    set_class = True
-    if event == cv2.EVENT_MOUSEMOVE:
-        mouse_x = x
-        mouse_y = y
-    elif event == cv2.EVENT_LBUTTONDBLCLK:
-        prev_was_double_click = True
-        #print('Double click')
-        point_1 = (-1, -1)
-        # if clicked inside a bounding box we set that bbox
-        set_selected_bbox(set_class)
-    # By AlexeyGy: delete via right-click
-    elif event == cv2.EVENT_RBUTTONDOWN:
-        set_class = False
-        set_selected_bbox(set_class)
-        if is_bbox_selected:
-            obj_to_edit = img_objects[selected_bbox]
-            
-            # if keyboard.is_pressed('r'):
-            #     print('remove with r')
-            edit_bbox(obj_to_edit, 'delete')
-            is_bbox_selected = False
-    elif event == cv2.EVENT_LBUTTONDOWN:
-        if prev_was_double_click:
-            #print('Finish double click')
-            prev_was_double_click = False
-        else:
-            #print('Normal left click')
-
-            # Check if mouse inside on of resizing anchors of the selected bbox
+        set_class = True
+        if event == cv2.EVENT_MOUSEMOVE:
+            mouse_x = x
+            mouse_y = y
+        elif event == cv2.EVENT_LBUTTONDBLCLK:
+            prev_was_double_click = True
+            #print('Double click')
+            point_1 = (-1, -1)
+            # if clicked inside a bounding box we set that bbox
+            set_selected_bbox(set_class)
+        # By AlexeyGy: delete via right-click
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            set_class = False
+            set_selected_bbox(set_class)
             if is_bbox_selected:
-                dragBBox.handler_left_mouse_down(x, y, img_objects[selected_bbox])
+                obj_to_edit = img_objects[selected_bbox]
+                
+                # if keyboard.is_pressed('r'):
+                #     print('remove with r')
+                edit_bbox(obj_to_edit, 'delete')
+                is_bbox_selected = False
+        elif event == cv2.EVENT_MBUTTONDOWN:
+            if is_bbox_selected:
+                c_id, x1,y1,x2,y2,_,_= img_objects[selected_bbox]
+                if pointInRect(x,y,x1,y1,x2,y2):
+                # if inside_bbox(x, y, img_objects[selected_bbox]):
+                # dragBBox.handler_left_mouse_down(x, y, img_objects[selected_bbox])
+                    root = tk.Tk()
+                    root.withdraw()
+                    USER_INP = tk.simpledialog.askstring(title="TrackId",
+                                    prompt=f"Current TrackId {c_id}, New TrackId:")
 
-            if dragBBox.anchor_being_dragged is None:
-                if point_1[0] == -1:
-                    if is_bbox_selected:
-                        if is_mouse_inside_delete_button():
-                            set_selected_bbox(set_class)
-                            obj_to_edit = img_objects[selected_bbox]
-                            edit_bbox(obj_to_edit, 'delete_recursive')
-                        is_bbox_selected = False
+                    obj_to_edit = img_objects[selected_bbox]
+                    edit_bbox(obj_to_edit, 'change_trackid:{}'.format(USER_INP))
+                    # print("TrackId", USER_INP)
+                    root.destroy()
+
+
+        elif event == cv2.EVENT_LBUTTONDOWN:
+           
+            if prev_was_double_click:
+                #print('Finish double click')
+                prev_was_double_click = False
+                prev_was_triple_click = True
+            else:
+                #print('Normal left click')
+
+                # Check if mouse inside on of resizing anchors of the selected bbox
+                if is_bbox_selected:
+                    dragBBox.handler_left_mouse_down(x, y, img_objects[selected_bbox])
+
+                if dragBBox.anchor_being_dragged is None:
+                    if point_1[0] == -1:
+                        if is_bbox_selected:
+                            if is_mouse_inside_delete_button():
+                                # set_selected_bbox(set_class)
+                                obj_to_edit = img_objects[selected_bbox]
+                                edit_bbox(obj_to_edit, 'delete_recursive')
+                            if is_mouse_inside_tracked_button():
+                                obj_to_edit = img_objects[selected_bbox]
+                                if obj_to_edit  in object_list:
+                                    if obj_to_edit in redo_tracking_objects:
+                                        redo_tracking_objects.remove(obj_to_edit)
+                                    non_track_objects.append(obj_to_edit)
+                                else:
+                                    if obj_to_edit in non_track_objects:
+                                        non_track_objects.remove(obj_to_edit)
+                                    redo_tracking_objects.append(obj_to_edit)
+                            is_bbox_selected = False
+                        else:
+                            # first click (start drawing a bounding box or delete an item)
+
+                            point_1 = (x, y)
                     else:
-                        # first click (start drawing a bounding box or delete an item)
+                        # minimal size for bounding box to avoid errors
+                        threshold = 5
+                        if abs(x - point_1[0]) > threshold or abs(y - point_1[1]) > threshold:
+                            # second click
+                            point_2 = (x, y)
 
-                        point_1 = (x, y)
-                else:
-                    # minimal size for bounding box to avoid errors
-                    threshold = 5
-                    if abs(x - point_1[0]) > threshold or abs(y - point_1[1]) > threshold:
-                        # second click
-                        point_2 = (x, y)
+        elif event == cv2.EVENT_LBUTTONUP:
+            if dragBBox.anchor_being_dragged is not None:
+                dragBBox.handler_left_mouse_up(x, y)
+    except Exception:
+        pass
 
-    elif event == cv2.EVENT_LBUTTONUP:
-        if dragBBox.anchor_being_dragged is not None:
-            dragBBox.handler_left_mouse_up(x, y)
 
 
 
@@ -590,6 +699,15 @@ def get_close_icon(x1, y1, x2, y2):
         percentage += 0.1
     return (x2 - height), y1, x2, (y1 + height)
 
+def get_tracked_icon(x1,y1,x2,y2):
+    percentage = 0.05
+    height = -1
+    while height < 10 and percentage < 0.50:
+        height = int((y2 - y1) * percentage)
+        percentage += 0.05
+    return x1, y1, (x1+height), (y1 + height)
+
+
 
 def draw_close_icon(tmp_img, x1_c, y1_c, x2_c, y2_c):
     red = (0,0,255)
@@ -599,6 +717,21 @@ def draw_close_icon(tmp_img, x1_c, y1_c, x2_c, y2_c):
     cv2.line(tmp_img, (x1_c, y2_c), (x2_c, y1_c), white, 2)
     return tmp_img
 
+def draw_tracked_icon(tmp_img, x1_c, y1_c, x2_c, y2_c):
+    green = (0,255,0)
+    cv2.rectangle(tmp_img, (x1_c + 1, y1_c - 1), (x2_c, y2_c), green, -1)
+    white = (255, 255, 255)
+    # cv2.line(tmp_img, (x1_c, y1_c), (x2_c, y2_c), white, 2)
+    # cv2.line(tmp_img, (x1_c, y2_c), (x2_c, y1_c), white, 2)
+    return tmp_img
+
+def draw_tracked_icon_grey(tmp_img, x1_c, y1_c, x2_c, y2_c):
+    grey = (192,192,192)
+    cv2.rectangle(tmp_img, (x1_c + 1, y1_c - 1), (x2_c, y2_c), grey, -1)
+    white = (255, 255, 255)
+    # cv2.line(tmp_img, (x1_c, y1_c), (x2_c, y2_c), white, 2)
+    # cv2.line(tmp_img, (x1_c, y2_c), (x2_c, y1_c), white, 2)
+    return tmp_img
 
 def draw_info_bb_selected(tmp_img):
     for idx, obj in enumerate(img_objects):
@@ -667,21 +800,28 @@ def get_annotation_paths(img_path, annotation_formats):
 
 
 
-def read_darklabel_file(file_dir,img_path):
-    frame_number = img_path.split('_')[-1].replace('.jpg','')
+def read_darklabel_file(file_dir,video_name):
+    # frame_number = img_path.split('_')[-1].replace('.jpg','')
     f = open(file_dir,'r')
     relevant_objs = []
-
+    
     for line in f:
         objs = line.split('\n')[0].split(',')
-        if int(objs[0]) == int(frame_number):
-            frame_number = objs.pop(0)
-            class_name = objs.pop(-1)
-            objs = list(map(int, objs))
-            objs.append(class_name)
-            relevant_objs.append(objs)
+        # if int(objs[0]) == int(frame_number):
+        frame_number = objs.pop(0)
+        class_name = objs.pop(-1)
+        objs = list(map(int, objs))
+        objs.append(CLASSES_INDEX[class_name])
+        objs.append(class_name)
+        relevant_objs.append(objs)
+        key = video_name+frame_number+'.jpg'
+        if labeling_file.get(key,None) == None:
+            labeling_file[key] = [objs]
+        else:
+            labeling_file[key].append(objs)
+        # labeling_file[]
     # curr_anchor_id = max(relevant_objs,key=lambda o: o[0])
-    return relevant_objs
+    # return relevant_objs
 
 def update_bounding_box(frame_path,anchor_id,class_index,xmin,ymin,xmax,ymax):
     w= abs(xmax-xmin)
@@ -695,6 +835,7 @@ def update_bounding_box(frame_path,anchor_id,class_index,xmin,ymin,xmax,ymax):
            labeling_file[frame_path].append([anchor_id, xmin,ymin,w,h,class_index,CLASS_LIST[class_index]])    
 
 
+
 def save_darklabel_txt(labeling_file_dir):
     open(labeling_file_dir, "w")
     with open(labeling_file_dir, "a+") as f:
@@ -704,13 +845,17 @@ def save_darklabel_txt(labeling_file_dir):
             nested_list = any(isinstance(i, list) for i in objs)
             if nested_list:
                 for obj in objs:
+                    index = obj.pop(-2)
                     output_line = frame_number + ',' + ','.join(str(e) for e in obj)
+                    obj.insert(-1,index)
                     f.write(output_line)
                     f.write("\n")
             else:
                 if objs == []:
                     continue
+                index = objs.pop(-2)
                 output_line = frame_number + ',' + ','.join(str(e) for e in objs)
+                objs.insert(-1,index)
                 f.write(output_line)
                 f.write("\n")
 
@@ -749,6 +894,7 @@ def is_frame_from_video(img_path):
 def get_json_file_data(json_file_path):
     if os.path.isfile(json_file_path):
         with open(json_file_path) as f:
+            # data = json.load(f)
             data = json.load(f)
             return True, data
     else:
@@ -804,9 +950,12 @@ def remove_already_tracked_objects(object_list, img_path, json_file_data):
     temp_object_list = object_list[:]
     for obj in temp_object_list:
         obj_dict = get_json_object_dict(obj, json_object_list)
-        if obj_dict is not None:
+        if obj_dict is not None and obj not in redo_tracking_objects:
             object_list.remove(obj)
             # json_object_list.remove(obj_dict)
+        elif obj in non_track_objects:
+            object_list.remove(obj)
+ 
     return object_list
 
 
@@ -920,6 +1069,7 @@ class LabelTracker():
 
 
     def start_tracker(self, json_file_data, json_file_path, img_path, obj, color, annotation_formats):
+        global img_index
         tracker = self.call_tracker_constructor(self.tracker_type)
         # anchor_id = json_file_data['n_anchor_ids']
         anchor_id = obj[0]
@@ -931,37 +1081,53 @@ class LabelTracker():
         xmin, ymin, xmax, ymax = obj[1:5]
         initial_bbox = (xmin, ymin, xmax - xmin, ymax - ymin)
         tracker.init(self.init_frame, initial_bbox)
+        # final_frame = None
         for frame_path in self.next_frame_path_list:
             next_image = cv2.imread(frame_path)
+            img_index = increase_index(img_index, last_img_index)
+            
+            # cv2.setTrackbarPos(TRACKBAR_IMG, WINDOW_NAME, img_index)
+            
+            
+            # final_frame = 
             # get the new bbox prediction of the object
             success, bbox = tracker.update(next_image.copy())
             if pred_counter >= N_FRAMES:
                 success = False
             if success:
+                
                 pred_counter += 1
                 # xmin, ymin, w, h = map(int, bbox)
                 xmin,ymin,w,h=bbox
                 xmax = xmin + w
                 ymax = ymin + h
-                obj = [anchor_id,xmin, ymin, xmax, ymax,class_index,class_name]
+                obj = [anchor_id,xmin, ymin, xmax, ymax,int(class_index),class_name]
                 frame_data_dict = json_file_add_object(frame_data_dict, frame_path, anchor_id, pred_counter, obj)
-                cv2.rectangle(next_image, (xmin, ymin), (xmax, ymax), color, LINE_THICKNESS)
+                cv2.rectangle(next_image, (xmin, ymin), (xmax, ymax), color, LINE_THICKNESS+1)
                 # save prediction
                 annotation_paths = get_annotation_paths(frame_path, annotation_formats)
                 # save_bounding_box(annotation_paths, class_index, (xmin, ymin), (xmax, ymax), self.img_w, self.img_h)
-                update_bounding_box(frame_path,anchor_id,class_index,xmin,ymin,xmax,ymax)
+                update_bounding_box(frame_path,anchor_id,int(class_index),xmin,ymin,xmax,ymax)
+
                 # show prediction
+                next_image = draw_bboxes_from_dict(next_image,frame_path)
                 cv2.imshow(WINDOW_NAME, next_image)
                 pressed_key = cv2.waitKey(DELAY)
+                if pressed_key == ord('x'):
+                    
+                    break
             else:
                 break
+        set_img_index(img_index)
+        cv2.setTrackbarPos(TRACKBAR_IMG, WINDOW_NAME, img_index)
 
         # json_file_data.update({'n_anchor_ids': (anchor_id + 1)})
         # curr_anchor_id
         # save the updated data
-        with open(json_file_path, 'w') as outfile:
-            json.dump(json_file_data, outfile, sort_keys=True, indent=4)
-        save_darklabel_txt(labeling_file_dir)
+        # copyfile(json_file_path, json_file_path[:-5]+'_backup.json')
+        # with open(json_file_path, 'w') as outfile:
+        #     json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+        # save_darklabel_txt(labeling_file_dir)
 
 
 def complement_bgr(color):
@@ -995,6 +1161,8 @@ if __name__ == '__main__':
             n_frames = int(test_video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
             test_video_cap.release()
             if n_frames > 0:
+                VIDEO_PATH = f_path
+                # CAPTURE = cv2.VideoCapture(f_path)
                 # it is a video
                 desired_img_format = '.jpg'
                 video_frames_path, video_name_ext = convert_video_to_images(f_path, n_frames, desired_img_format)
@@ -1026,9 +1194,16 @@ if __name__ == '__main__':
            
                 open(labeling_file_dir, 'a').close()
             else:
-                copyfile(labeling_file_dir, labeling_file_dir[:-4]+'_backup.txt')
-                for img_path in IMAGE_PATH_LIST:
-                    labeling_file[img_path] = read_darklabel_file(labeling_file_dir,img_path)
+                try:
+                    copyfile(json_file_path, json_file_path[:-5]+'_backup.json')
+                except Exception:
+                    pass
+                first_element = IMAGE_PATH_LIST[0]
+                ending = IMAGE_PATH_LIST[0].split('_')[-1]
+                root_name = first_element.replace(ending,'')
+                read_darklabel_file(labeling_file_dir,root_name)
+                # for img_path in IMAGE_PATH_LIST:
+                #     labeling_file[img_path] = read_darklabel_file(labeling_file_dir,img_path)
                 set_max_anchor()
 
 
@@ -1071,6 +1246,12 @@ if __name__ == '__main__':
     display_text('Welcome!\n Press [h] for help.', 4000)
 
     # loop
+    img_path = IMAGE_PATH_LIST[img_index]
+    is_from_video, CURR_VIDEO_NAME = is_frame_from_video(img_path)
+    object_list=img_objects[:]
+    if is_from_video:
+        json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, CURR_VIDEO_NAME))
+        file_exists, current_data = get_json_file_data(json_file_path)
     while True:
         color = class_rgb[class_index].tolist()
         # clone the img
@@ -1090,8 +1271,21 @@ if __name__ == '__main__':
         tmp_img = cv2.rectangle(tmp_img, (mouse_x + LINE_THICKNESS, mouse_y - LINE_THICKNESS), (mouse_x + text_width + margin, mouse_y - text_height - margin), complement_bgr(color), -1)
         tmp_img = cv2.putText(tmp_img, class_name+str(curr_anchor_id), (mouse_x + margin, mouse_y - margin), font, font_scale, color, LINE_THICKNESS, cv2.LINE_AA)
         # get annotation paths
+
         img_path = IMAGE_PATH_LIST[img_index]
         annotation_paths = get_annotation_paths(img_path, annotation_formats)
+
+        object_list = img_objects[:]
+        for o in object_list:
+            x1_c, y1_c, x2_c, y2_c=get_tracked_icon(*o[1:5])
+            tmp_img = draw_tracked_icon_grey(tmp_img,x1_c, y1_c, x2_c, y2_c)
+        object_list = remove_already_tracked_objects(object_list, img_path, current_data)
+        for o in object_list:
+            x1_c, y1_c, x2_c, y2_c=get_tracked_icon(*o[1:5])
+            tmp_img = draw_tracked_icon(tmp_img,x1_c, y1_c, x2_c, y2_c)
+
+  
+
         if dragBBox.anchor_being_dragged is not None:
             dragBBox.handler_mouse_move(mouse_x, mouse_y)
         # draw already done bounding boxes
@@ -1108,7 +1302,8 @@ if __name__ == '__main__':
             if point_2[0] != -1:
                 # save the bounding box
                 # save_bounding_box(annotation_paths, class_index, point_1, point_2, width, height)
-                update_bounding_box(img_path,curr_anchor_id,class_index,point_1[0],point_1[1],point_2[0],point_2[1])
+                update_bounding_box(img_path,curr_anchor_id,int(class_index),point_1[0],point_1[1],point_2[0],point_2[1])
+                
                 # update_json_anchor_id()
                 curr_anchor_id+=1
                 save_darklabel_txt(labeling_file_dir)
@@ -1140,8 +1335,10 @@ if __name__ == '__main__':
                     class_index = increase_index(class_index, last_class_index)
                 draw_line(tmp_img, mouse_x, mouse_y, height, width, color)
                 set_class_index(class_index)
-                cv2.setTrackbarPos(TRACKBAR_CLASS, WINDOW_NAME, class_index)
+                cv2.setTrackbarPos(TRACKBAR_CLASS, WINDOW_NAME, int(class_index))
                 if is_bbox_selected:
+                    if selected_bbox > len(img_objects):
+                        continue
                     obj_to_edit = img_objects[selected_bbox]
                     edit_bbox(obj_to_edit, 'change_class:{}'.format(class_index))
             # help key listener
@@ -1153,6 +1350,56 @@ if __name__ == '__main__':
                         )
                 display_text(text, 5000)
             # show edges key listener
+            # elif pressed_key == ord('b'):
+            #     # merge trackids of consectutive frames (this frame with prev)
+            #     current_img_path = IMAGE_PATH_LIST[img_index]
+              
+            #     is_from_video, video_name = is_frame_from_video(current_img_path)
+            #     if is_from_video:
+            #         # get json file corresponding to that video
+            #         json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, video_name))
+            #         file_exists, json_file_data = get_json_file_data(json_file_path)
+            #         try:
+            #             copyfile(json_file_path, json_file_path[:-5]+'_backup.json')
+            #         except Exception:
+            #             pass
+            #         with open(json_file_path, 'w') as outfile:
+            #             # json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+            #             json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+            #         save_darklabel_txt(labeling_file_dir)
+
+
+            elif pressed_key == ord('m'):
+                current_img_path = IMAGE_PATH_LIST[img_index]
+              
+                is_from_video, video_name = is_frame_from_video(current_img_path)
+                if is_from_video:
+                    # get json file corresponding to that video
+                    json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, video_name))
+                    file_exists, json_file_data = get_json_file_data(json_file_path)
+                    try:
+                        copyfile(json_file_path, json_file_path[:-5]+'_backup.json')
+                    except Exception:
+                        pass
+                    with open(json_file_path, 'w') as outfile:
+                        # json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                        json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                save_darklabel_txt(labeling_file_dir)
+
+                # show_curr_tracked =  not show_curr_tracked
+                img_path = IMAGE_PATH_LIST[img_index]
+                is_from_video, CURR_VIDEO_NAME = is_frame_from_video(img_path)
+                object_list=img_objects[:]
+                if is_from_video:
+                    json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, CURR_VIDEO_NAME))
+                    file_exists, current_data = get_json_file_data(json_file_path)
+
+                    # if file_exists:
+                    #     object_list = remove_already_tracked_objects(object_list, img_path, current_data)
+                    #     for o in object_list:
+                    #         x1_c, y1_c, x2_c, y2_c=get_tracked_icon(o[0],o[1],o[2],o[3])
+                    #         tmp_img = draw_tracked_icon(tmp_img,x1_c, y1_c, x2_c, y2_c)
+
             elif pressed_key == ord('e'):
                 if edges_on == True:
                     edges_on = False
@@ -1177,7 +1424,12 @@ if __name__ == '__main__':
                         # initial frame
                         init_frame = img.copy()
                         label_tracker = LabelTracker(TRACKER_TYPE, init_frame, next_frame_path_list)
+                        backup_tracker_frame = img_index
                         for obj in object_list:
+                            img_index = backup_tracker_frame
+                            set_img_index(img_index)
+                            cv2.setTrackbarPos(TRACKBAR_IMG, WINDOW_NAME, img_index)
+
                             class_index = obj[-2]
                             color = class_rgb[class_index].tolist()
                             label_tracker.start_tracker(json_file_data, json_file_path, img_path, obj, color, annotation_formats)
@@ -1186,10 +1438,11 @@ if __name__ == '__main__':
                 # boxes, confidences, classIds =  detector.detect(im_rgb)
                 image_size = 1024
                 height, width = im_rgb.shape[:2]
-                image = im_rgb.astype(np.float32) / 255
-                image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
-                image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
-                image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
+                image = im_rgb.astype(np.float32)
+                # image = im_rgb.astype(np.float32) / 255
+                # image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
+                # image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
+                # image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
                 if height > width:
                     scale = image_size / height
                     resized_height = image_size
@@ -1206,27 +1459,63 @@ if __name__ == '__main__':
                 new_image = np.transpose(new_image, (2, 0, 1))
                 new_image = new_image[None, :, :, :]
                 new_image = torch.Tensor(new_image)
+
                 if torch.cuda.is_available():
                     new_image = new_image.cuda()
                 with torch.no_grad():
-                    confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
+                    y = detector([{'image': new_image.squeeze()}], is_training=False)[0]
+                    confidences = y['instances'].get('scores')
+                    classIds = y['instances'].get('pred_classes')
+                    boxes = y['instances'].get('pred_boxes').tensor
+                    # confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
                     boxes /= scale
                 boxes[:,2]=boxes[:,2]-boxes[:,0] # we need x y w h
                 boxes[:,3]=boxes[:,3]-boxes[:,1]
-                boxes=boxes[confidences>0.7].cpu() 
-                classIds=classIds[confidences>0.7].cpu()
-                confidences=confidences[confidences>0.7].cpu()
+                boxes=boxes[confidences>0.4].cpu() 
+                classIds=classIds[confidences>0.4].cpu()
+                confidences=confidences[confidences>0.4].cpu()
                 if  len(boxes)>0:
                     # object_list=img_objects[:]
-                    for box,class_ in zip(boxes,classIds):
-                        update_bounding_box(img_path,curr_anchor_id,class_index,int(box[0]),int(box[1]),(int(box[0]) + int(box[2])),(int(box[1]) + int(box[3])))
+                    for box,class_index in zip(boxes,classIds):
+                        update_bounding_box(img_path,curr_anchor_id,int(class_index),int(box[0]),int(box[1]),(int(box[0]) + int(box[2])),(int(box[1]) + int(box[3])))
                         curr_anchor_id+=1
-
-            # quit key listener
-            elif pressed_key == ord('q'):
                 save_darklabel_txt(labeling_file_dir)
 
-
+            elif pressed_key == ord(' '):
+                current_img_path = IMAGE_PATH_LIST[img_index]
+              
+                is_from_video, video_name = is_frame_from_video(current_img_path)
+                if is_from_video:
+                    # get json file corresponding to that video
+                    json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, video_name))
+                    file_exists, json_file_data = get_json_file_data(json_file_path)
+                    try:
+                        copyfile(json_file_path, json_file_path[:-5]+'_backup.json')
+                    except Exception:
+                        pass
+                    with open(json_file_path, 'w') as outfile:
+                        # json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                        json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                save_darklabel_txt(labeling_file_dir)
+    
+            # quit key listener
+            elif pressed_key == ord('q'):
+                current_img_path = IMAGE_PATH_LIST[img_index]
+              
+                is_from_video, video_name = is_frame_from_video(current_img_path)
+                if is_from_video:
+                    # get json file corresponding to that video
+                    json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, video_name))
+                    file_exists, json_file_data = get_json_file_data(json_file_path)
+                    try:
+                        copyfile(json_file_path, json_file_path[:-5]+'_backup.json')
+                    except Exception:
+                        pass
+                    with open(json_file_path, 'w') as outfile:
+                        # json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                        json.dump(json_file_data, outfile, sort_keys=True, indent=4)
+                save_darklabel_txt(labeling_file_dir)
+                
                 break
             ''' Key Listeners END '''
 

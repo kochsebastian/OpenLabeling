@@ -26,8 +26,8 @@ class SiamMask(object):
 
     def __init__(self,classid=0,anchorid=0,init_frame=None,init_bbox=None):
         # load config
-        cfg_path = 'pysot/experiments/siamrpn_r50_l234_dwxcorr/config.yaml'
-        snapshot = 'pysot/experiments/siamrpn_r50_l234_dwxcorr/model.pth'
+        cfg_path = '../object_detection/pysot/experiments/siamrpn_r50_l234_dwxcorr/config.yaml'
+        snapshot = '../object_detection/pysot/experiments/siamrpn_r50_l234_dwxcorr/model.pth'
         cfg.merge_from_file(cfg_path)
         cfg.CUDA = torch.cuda.is_available() and cfg.CUDA
         # cfg.CUDA = False
@@ -92,7 +92,7 @@ class SiamMask(object):
             #                 (bbox[0]+bbox[2], bbox[1]+bbox[3]),
             #                 (0, 255, 0), 3)
             score = outputs['best_score']
-            if score >0.6:
+            if score > 0.7:
                 return True, bbox
             else:
                 return False, bbox
