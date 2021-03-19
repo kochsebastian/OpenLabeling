@@ -1,0 +1,26 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["--tracker","SiamMask","-n","1000"],
+            "cwd": "/home/skoch/AutoLabeling/main/",
+        }
+        {
+            "name": "auto_main",
+            "type": "python",
+            "request": "launch",
+            "program": "main_auto.py",
+            "console": "integratedTerminal",
+            "args": ["--input_dir","/home/skoch/Labeling/labeled/DJI_0056/input","--output_dir","/home/skoch/Labeling/labeled/DJI_0056/output"],
+            "cwd": "/home/skoch/AutoLabeling/main"
+        }
+    ]
+}
