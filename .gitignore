@@ -8,3 +8,4 @@ object_detection/models/*
 __pychache__/
 input/
 output/
+object_detection/crow/
