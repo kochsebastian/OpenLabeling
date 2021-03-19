@@ -53,7 +53,7 @@ parser.add_argument('-t', '--thickness', default='2', type=int, help='Bounding b
 
 parser.add_argument('--tracker', default='SiamMask', type=str, help="tracker_type being used: ['SiamMask']")
 parser.add_argument('-n', '--n_frames', default='10000000', type=int, help='number of frames to track object for')
-parser.add_argument('--detector', default='../object_detection/crow/epoch=46-step=17342.ckpt', type=str, help='Detector checkpoint dir')
+parser.add_argument('--detector', default='../object_detection/efficientdet/trained_models/signatrix_efficientdet_coco.pth', type=str, help='Detector checkpoint dir')
 args = parser.parse_args()
 
 model = args.detector
