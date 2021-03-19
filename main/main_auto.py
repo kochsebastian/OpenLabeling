@@ -17,7 +17,6 @@ sys.path.insert(0, "..")
 import configparser
 from siammask import SiamMask
 import torch
-from centernet_better.train import CenterNetBetterModule
 
 
 # load class list
@@ -90,7 +89,7 @@ point_2 = (-1, -1)
 
 model = args.detector
 if torch.cuda.is_available():
-    detector = CenterNetBetterModule.load_from_checkpoint(model, pretrained_checkpoints_path=None)
+    detector = torch.load(model)
     detector = detector.cuda()
 else:
     detector = torch.load(model,map_location='cpu').module
@@ -953,13 +952,11 @@ while True:
     print("Using Detector!!!!")
     im_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     # boxes, confidences, classIds =  detector.detect(im_rgb)
-    image_size = 1024
     height, width = im_rgb.shape[:2]
-    image = im_rgb.astype(np.float32)
-    # image = im_rgb.astype(np.float32) / 255
-    # image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
-    # image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
-    # image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
+    image = im_rgb.astype(np.float32) / 255
+    image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
+    image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
+    image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
     if height > width:
         scale = image_size / height
         resized_height = image_size
@@ -979,17 +976,14 @@ while True:
     if torch.cuda.is_available():
         new_image = new_image.cuda()
     with torch.no_grad():
-        y = detector([{'image': new_image.squeeze()}], is_training=False)[0]
-        confidences = y['instances'].get('scores')
-        classIds = y['instances'].get('pred_classes')
-        boxes = y['instances'].get('pred_boxes').tensor
-        # confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
+        confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
         boxes /= scale
     boxes[:,2]=boxes[:,2]-boxes[:,0] # we need x y w h
     boxes[:,3]=boxes[:,3]-boxes[:,1]
     boxes=boxes[confidences>0.4].cpu() 
     classIds=classIds[confidences>0.4].cpu()
     confidences=confidences[confidences>0.4].cpu()
+
 
     # new_boxes = boxes[:,:]
 

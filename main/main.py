@@ -1,7 +1,7 @@
 #!/bin/python
 import argparse
 import glob
-import json, orjson, ujson
+import json
 import os
 import re
 import time
@@ -10,10 +10,9 @@ import numpy as np
 from tqdm import tqdm
 from shutil import copyfile
 import torch
-from centernet_better.train import CenterNetBetterModule
 import tkinter as tk
+import tkinter.simpledialog 
 import sys
-
 
 # load class list
 def nonblank_lines(f):
@@ -58,7 +57,7 @@ args = parser.parse_args()
 
 model = args.detector
 if torch.cuda.is_available():
-    detector = CenterNetBetterModule.load_from_checkpoint(model, pretrained_checkpoints_path=None)
+    detector = torch.load(model)
     detector = detector.cuda()
 else:
     detector = torch.load(model,map_location='cpu').module
@@ -76,9 +75,6 @@ INPUT_DIR  = args.input_dir
 OUTPUT_DIR = args.output_dir
 N_FRAMES   = args.n_frames
 TRACKER_TYPE = args.tracker
-
-if TRACKER_TYPE == "DASIAMRPN":
-    from dasiamrpn import dasiamrpn
 
 if TRACKER_TYPE == "SiamMask":
     from siammask import SiamMask
@@ -624,15 +620,13 @@ def mouse_listener(event, x, y, flags, param):
                 edit_bbox(obj_to_edit, 'delete')
                 is_bbox_selected = False
         elif event == cv2.EVENT_MBUTTONDOWN:
+            
             if is_bbox_selected:
                 c_id, x1,y1,x2,y2,_,_= img_objects[selected_bbox]
                 if pointInRect(x,y,x1,y1,x2,y2):
-                # if inside_bbox(x, y, img_objects[selected_bbox]):
-                # dragBBox.handler_left_mouse_down(x, y, img_objects[selected_bbox])
                     root = tk.Tk()
                     root.withdraw()
-                    USER_INP = tk.simpledialog.askstring(title="TrackId",
-                                    prompt=f"Current TrackId {c_id}, New TrackId:")
+                    USER_INP = tk.simpledialog.askstring(title="TrackId",prompt=f"Current TrackId {c_id}, New TrackId:")
 
                     obj_to_edit = img_objects[selected_bbox]
                     edit_bbox(obj_to_edit, 'change_trackid:{}'.format(USER_INP))
@@ -686,6 +680,7 @@ def mouse_listener(event, x, y, flags, param):
             if dragBBox.anchor_being_dragged is not None:
                 dragBBox.handler_left_mouse_up(x, y)
     except Exception:
+        print("Unexpected error:", sys.exc_info()[0])
         pass
 
 
@@ -1435,14 +1430,13 @@ if __name__ == '__main__':
                             label_tracker.start_tracker(json_file_data, json_file_path, img_path, obj, color, annotation_formats)
             elif pressed_key == ord('o'):
                 im_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                # boxes, confidences, classIds =  detector.detect(im_rgb)
                 image_size = 1024
+                # boxes, confidences, classIds =  detector.detect(im_rgb)
                 height, width = im_rgb.shape[:2]
-                image = im_rgb.astype(np.float32)
-                # image = im_rgb.astype(np.float32) / 255
-                # image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
-                # image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
-                # image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
+                image = im_rgb.astype(np.float32) / 255
+                image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
+                image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
+                image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
                 if height > width:
                     scale = image_size / height
                     resized_height = image_size
@@ -1459,21 +1453,17 @@ if __name__ == '__main__':
                 new_image = np.transpose(new_image, (2, 0, 1))
                 new_image = new_image[None, :, :, :]
                 new_image = torch.Tensor(new_image)
-
                 if torch.cuda.is_available():
                     new_image = new_image.cuda()
                 with torch.no_grad():
-                    y = detector([{'image': new_image.squeeze()}], is_training=False)[0]
-                    confidences = y['instances'].get('scores')
-                    classIds = y['instances'].get('pred_classes')
-                    boxes = y['instances'].get('pred_boxes').tensor
-                    # confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
+                    confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
                     boxes /= scale
                 boxes[:,2]=boxes[:,2]-boxes[:,0] # we need x y w h
                 boxes[:,3]=boxes[:,3]-boxes[:,1]
                 boxes=boxes[confidences>0.4].cpu() 
                 classIds=classIds[confidences>0.4].cpu()
                 confidences=confidences[confidences>0.4].cpu()
+
                 if  len(boxes)>0:
                     # object_list=img_objects[:]
                     for box,class_index in zip(boxes,classIds):
