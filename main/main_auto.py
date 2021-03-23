@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, "..")
 # from object_detection.tf_object_detection import ObjectDetector
 import configparser
-from siammask import SiamMask
+
 import torch
 
 
@@ -50,7 +50,7 @@ parser = argparse.ArgumentParser(description='Open-source image labeling tool')
 parser.add_argument('-i', '--input_dir', default='input', type=str, help='Path to input directory')
 parser.add_argument('-o', '--output_dir', default='output', type=str, help='Path to output directory')
 parser.add_argument('-t', '--thickness', default='1', type=int, help='Bounding box and cross line thickness')
-parser.add_argument('--detector', default='../object_detection/efficientdet/trained_models/signatrix_efficientdet_coco.pth', type=str, help='Detector checkpoint dir')
+parser.add_argument('--detector', default='EfficientDet', type=str, help='Detector checkpoint dir')
 parser.add_argument('--tracker', default='SiamMask', type=str, help="tracker_type being used: ['SiamMask']")
 
 args = parser.parse_args()
@@ -87,13 +87,18 @@ point_1 = (-1, -1)
 point_2 = (-1, -1)
 
 
-model = args.detector
-if torch.cuda.is_available():
-    detector = torch.load(model)
-    detector = detector.cuda()
+if args.detector == "EfficientDet":
+    detector = EfficientDet()
 else:
-    detector = torch.load(model,map_location='cpu').module
+    raise NotImplementedError
 
+TRACKER_TYPE = "MIL"
+if args.tracker == "SiamMask":
+    TRACKER_TYPE = 'Adv_Tracker'
+    from siammask import SiamMask as Adv_Tracker
+elif:
+    TRACKER_TYPE = 'Adv_Tracker'
+    raise NotImplementedError
 
 def display_text(text, time):
     if WITH_QT:
@@ -555,40 +560,17 @@ def json_file_add_object(frame_data_dict, img_path, anchor_id, pred_counter, obj
 
 
 class Tracker:
-    ''' Special thanks to Rafael Caballero Gonzalez '''
-    # extract the OpenCV version info, e.g.:
-    # OpenCV 3.3.4 -> [major_ver].[minor_ver].[subminor_ver]
+
     (major_ver, minor_ver, subminor_ver) = (cv2.__version__).split('.')
 
-    # TODO: press ESC to stop the tracking process
 
     def __init__(self, tracker_type, anchorId, classId):
         self.instance = self.call_tracker_constructor(tracker_type) # Tracker instance
         self.classId = classId # Id of object such as people, bicycle,...
         self.anchorId = anchorId # Id of tracker
 
-    def call_tracker_constructor(self, tracker_type):
-        # -- TODO: remove this if I assume OpenCV version > 3.4.0
-        if int(self.major_ver == 3) and int(self.minor_ver) < 3:
-            tracker = cv2.Tracker_create(tracker_type)
-        # --
-        else:
-            if tracker_type == 'CSRT':
-                tracker = cv2.TrackerCSRT_create()
-            elif tracker_type == 'KCF':
-                tracker = cv2.TrackerKCF_create()
-            elif tracker_type == 'MOSSE':
-                tracker = cv2.TrackerMOSSE_create()
-            elif tracker_type == 'MIL':
-                tracker = cv2.TrackerMIL_create()
-            elif tracker_type == 'BOOSTING':
-                tracker = cv2.TrackerBoosting_create()
-            elif tracker_type == 'MEDIANFLOW':
-                tracker = cv2.TrackerMedianFlow_create()
-            elif tracker_type == 'TLD':
-                tracker = cv2.TrackerTLD_create()
-            elif tracker_type == 'GOTURN':
-                tracker = cv2.TrackerGOTURN_create()
+    def call_tracker_constructor(self, tracker_type):        
+        tracker = cv2.TrackerMIL_create()
         return tracker
 
 
@@ -617,27 +599,18 @@ def set_max_anchor():
             + If there is not, using trackers to predict objects in the next frame. Continue until there is any "miss" tracker
 '''
 class TrackerManager:
-    ''' Special thanks to Rafael Caballero Gonzalez '''
-    # extract the OpenCV version info, e.g.:
-    # OpenCV 3.3.4 -> [major_ver].[minor_ver].[subminor_ver]
+
     (major_ver, minor_ver, subminor_ver) = (cv2.__version__).split('.')
 
-    # TODO: press ESC to stop the tracking process
 
     def __init__(self, tracker_type, init_frame, next_frame_path_list):
-        tracker_types = ['SiamMask']
-        ''' Recomended tracker_type:
-              KCF -> KCF is usually very good (minimum OpenCV 3.1.0)
-              CSRT -> More accurate than KCF but slightly slower (minimum OpenCV 3.4.2)
-              MOSSE -> Less accurate than KCF but very fast (minimum OpenCV 3.4.1)
-        '''
+        tracker_types = ['Adv_Tracker']
+ 
         self.tracker_type = tracker_type
-        # -- TODO: remove this if I assume OpenCV version > 3.4.0
-        if tracker_type == 'SiamMask':
-            self.tracker_type = 'SiamMask'
-        elif tracker_type == tracker_types[0] or tracker_type == tracker_types[2]:
-            if int(self.major_ver == 3) and int(self.minor_ver) < 4:
-                self.tracker_type = tracker_types[1]  # Use KCF instead of CSRT or MOSSE
+        if tracker_type == 'Adv_Tracker':
+            self.tracker_type = 'Adv_Tracker'
+        else:
+            self.tracker_type = cv2.TrackerMIL_create()
         # --
         self.init_frame = init_frame
         self.next_frame_path_list = next_frame_path_list
@@ -661,10 +634,10 @@ class TrackerManager:
         for box, classId in zip(bboxes, classIds):
 
             anchor_id = anchor_id + 1
-            if self.tracker_type == 'SiamMask':
+            if self.tracker_type == 'Adv_Tracker':
                 
                 initial_bbox = (box[0], box[1], box[2], box[3])
-                tracker = SiamMask(anchorid=anchor_id, classid=classId,init_frame=self.init_frame,init_bbox=initial_bbox)
+                tracker = Adv_Tracker(anchorid=anchor_id, classid=classId,init_frame=self.init_frame,init_bbox=initial_bbox)
                 data = [anchor_id,classId,self.init_frame,initial_bbox]
                 tracker.init(self.init_frame,initial_bbox)
             else:
@@ -728,7 +701,7 @@ class TrackerManager:
             # Check if there is any "miss" tracker
             for t,tracker in enumerate(self.trackers):
                 next_image = cv2.imread(frame_path)
-                if self.tracker_type=='SiamMask':
+                if self.tracker_type=='Adv_Tracker':
                     success, bbox  = tracker.update(next_image.copy())
                 else:
                     success, bbox = tracker.instance.update(next_image.copy())
@@ -1025,7 +998,7 @@ while True:
                 new_track =True
                 return_to_index = img_index
                 print("Using tracker!!!!")
-                tracker_manager = TrackerManager(args.tracker, init_frame, next_frame_path_list)
+                tracker_manager = TrackerManager(TRACKER_TYPE, init_frame, next_frame_path_list)
                 new_boxes_max = np.asarray([object_[1:5] for object_ in object_list])
                 new_classIds = [object_[-2] for object_ in object_list]
 

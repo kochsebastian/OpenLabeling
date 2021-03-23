@@ -52,15 +52,28 @@ parser.add_argument('-t', '--thickness', default='2', type=int, help='Bounding b
 
 parser.add_argument('--tracker', default='SiamMask', type=str, help="tracker_type being used: ['SiamMask']")
 parser.add_argument('-n', '--n_frames', default='10000000', type=int, help='number of frames to track object for')
-parser.add_argument('--detector', default='../object_detection/efficientdet/trained_models/signatrix_efficientdet_coco.pth', type=str, help='Detector checkpoint dir')
+parser.add_argument('--detector', default='EfficientDet', type=str, help='Detector checkpoint dir')
 args = parser.parse_args()
 
-model = args.detector
-if torch.cuda.is_available():
-    detector = torch.load(model)
-    detector = detector.cuda()
+
+if args.detector == "EfficientDet":
+    from efficientdet import EfficientDet
+    detector = EfficientDet()
 else:
-    detector = torch.load(model,map_location='cpu').module
+    raise NotImplementedError
+
+TRACKER_TYPE = "MIL"
+if args.tracker == "SiamMask":
+    from siammask import SiamMask as Adv_Tracker
+    TRACKER_TYPE = 'Adv_Tracker'
+elif False:
+    TRACKER_TYPE = 'Adv_Tracker'
+    raise NotImplementedError
+
+    
+
+
+
 
 class_index = 0
 img_index = 0
@@ -74,10 +87,9 @@ redo_tracking_objects = []
 INPUT_DIR  = args.input_dir
 OUTPUT_DIR = args.output_dir
 N_FRAMES   = args.n_frames
-TRACKER_TYPE = args.tracker
 
-if TRACKER_TYPE == "SiamMask":
-    from siammask import SiamMask
+
+    
 
 
 WINDOW_NAME    = 'OpenLabeling'
@@ -1000,26 +1012,15 @@ def json_file_add_object(frame_data_dict, img_path, anchor_id, pred_counter, obj
 
 
 class LabelTracker():
-    ''' Special thanks to Rafael Caballero Gonzalez '''
-    # extract the OpenCV version info, e.g.:
-    # OpenCV 3.3.4 -> [major_ver].[minor_ver].[subminor_ver]
+
     (major_ver, minor_ver, subminor_ver) = (cv2.__version__).split('.')
 
-    # TODO: press ESC to stop the tracking process
 
     def __init__(self, tracker_type, init_frame, next_frame_path_list):
-        tracker_types = ['CSRT', 'KCF','MOSSE', 'MIL', 'BOOSTING', 'MEDIANFLOW', 'TLD', 'GOTURN', 'DASIAMRPN','SiamMask']
-        ''' Recomended tracker_type:
-              KCF -> KCF is usually very good (minimum OpenCV 3.1.0)
-              CSRT -> More accurate than KCF but slightly slower (minimum OpenCV 3.4.2)
-              MOSSE -> Less accurate than KCF but very fast (minimum OpenCV 3.4.1)
-        '''
+        tracker_types = ['Adv_Tracker']
+
         self.tracker_type = tracker_type
-        # -- TODO: remove this if I assume OpenCV version > 3.4.0
-        if tracker_type == tracker_types[0] or tracker_type == tracker_types[2]:
-            if int(self.major_ver == 3) and int(self.minor_ver) < 4:
-                self.tracker_type = tracker_types[1] # Use KCF instead of CSRT or MOSSE
-        # --
+
         self.init_frame = init_frame
         self.next_frame_path_list = next_frame_path_list
 
@@ -1027,39 +1028,12 @@ class LabelTracker():
 
 
     def call_tracker_constructor(self, tracker_type):
-        if tracker_type == 'DASIAMRPN':
-            tracker = dasiamrpn()
-        elif tracker_type == 'SiamMask':
-            tracker = SiamMask()
+        
+        if tracker_type == 'Adv_Tracker':
+            tracker = Adv_Tracker()
         else:
-            # -- TODO: remove this if I assume OpenCV version > 3.4.0
-            if int(self.major_ver == 3) and int(self.minor_ver) < 3:
-                #tracker = cv2.Tracker_create(tracker_type)
-                pass
-            # --
-            else:
-                try:
-                    tracker = cv2.TrackerKCF_create()
-                except AttributeError as error:
-                    print(error)
-                    print('\nMake sure that OpenCV contribute is installed: opencv-contrib-python\n')
-                if tracker_type == 'CSRT':
-                    tracker = cv2.TrackerCSRT_create()
-                elif tracker_type == 'KCF':
-                    tracker = cv2.TrackerKCF_create()
-                elif tracker_type == 'MOSSE':
-                    tracker = cv2.TrackerMOSSE_create()
-                elif tracker_type == 'MIL':
-                    tracker = cv2.TrackerMIL_create()
-                elif tracker_type == 'BOOSTING':
-                    tracker = cv2.TrackerBoosting_create()
-                elif tracker_type == 'MEDIANFLOW':
-                    tracker = cv2.TrackerMedianFlow_create()
-                elif tracker_type == 'TLD':
-                    tracker = cv2.TrackerTLD_create()
-                elif tracker_type == 'GOTURN':
-                    tracker = cv2.TrackerGOTURN_create()
-                
+            tracker = cv2.TrackerMIL_create()
+              
         return tracker
 
 
@@ -1429,40 +1403,10 @@ if __name__ == '__main__':
                             color = class_rgb[class_index].tolist()
                             label_tracker.start_tracker(json_file_data, json_file_path, img_path, obj, color, annotation_formats)
             elif pressed_key == ord('o'):
-                im_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                image_size = 1024
-                # boxes, confidences, classIds =  detector.detect(im_rgb)
-                height, width = im_rgb.shape[:2]
-                image = im_rgb.astype(np.float32) / 255
-                image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
-                image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
-                image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
-                if height > width:
-                    scale = image_size / height
-                    resized_height = image_size
-                    resized_width = int(width * scale)
-                else:
-                    scale = image_size / width
-                    resized_height = int(height * scale)
-                    resized_width = image_size
+                
+                confidences, classIds, boxes = detector.detect(img, conf=0.4) # boxes are xmin ymin xmax ymax
+          
 
-                image = cv2.resize(image, (resized_width, resized_height))
-
-                new_image = np.zeros((image_size, image_size, 3))
-                new_image[0:resized_height, 0:resized_width] = image
-                new_image = np.transpose(new_image, (2, 0, 1))
-                new_image = new_image[None, :, :, :]
-                new_image = torch.Tensor(new_image)
-                if torch.cuda.is_available():
-                    new_image = new_image.cuda()
-                with torch.no_grad():
-                    confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
-                    boxes /= scale
-                boxes[:,2]=boxes[:,2]-boxes[:,0] # we need x y w h
-                boxes[:,3]=boxes[:,3]-boxes[:,1]
-                boxes=boxes[confidences>0.4].cpu() 
-                classIds=classIds[confidences>0.4].cpu()
-                confidences=confidences[confidences>0.4].cpu()
 
                 if  len(boxes)>0:
                     # object_list=img_objects[:]

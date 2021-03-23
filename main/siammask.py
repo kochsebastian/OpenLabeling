@@ -54,16 +54,12 @@ class SiamMask(object):
 
     def init(self, init_frame, initial_bbox):
         """
-        Initialize DaSiamRPN tracker with inital frame and bounding box.
+        Initialize SiamRPN tracker with inital frame and bounding box.
         """
         with torch.no_grad():
             self.tracker.init(init_frame,initial_bbox)
-        # target_pos, target_sz = self.bbox_to_pos(initial_bbox)
-        # self.state = SiamRPN_init(
-        #     init_frame, target_pos, target_sz, self.net)
 
-    def init_reinit(self):
-        self.init(self.init_frame,self.init_bbox)
+
 
     def update(self, next_image):
         """
@@ -73,24 +69,10 @@ class SiamMask(object):
         the opencv tracking algorithms).
         """
         with torch.no_grad():
-            # self.state = SiamRPN_track(self.state, next_image)
-            # target_pos = self.state["target_pos"]
-            # target_sz  = self.state["target_sz"]
-            # bbox = self.pos_to_bbox(target_pos, target_sz)
             outputs = self.tracker.track(next_image)
-            # if 'polygon' in outputs:
-            #     polygon = np.array(outputs['polygon']).astype(np.int32)
-            #     cv2.polylines(frame, [polygon.reshape((-1, 1, 2))],
-            #                     True, (0, 255, 0), 3)
-            #     mask = ((outputs['mask'] > cfg.TRACK.MASK_THERSHOLD) * 255)
-            #     mask = mask.astype(np.uint8)
-            #     mask = np.stack([mask, mask*255, mask]).transpose(1, 2, 0)
-            #     frame = cv2.addWeighted(frame, 0.77, mask, 0.23, -1)
-            # else:
+
             bbox = list(map(int, outputs['bbox']))
-            # cv2.rectangle(frame, (bbox[0], bbox[1]),
-            #                 (bbox[0]+bbox[2], bbox[1]+bbox[3]),
-            #                 (0, 255, 0), 3)
+
             score = outputs['best_score']
             if score > 0.7:
                 return True, bbox
@@ -98,30 +80,3 @@ class SiamMask(object):
                 return False, bbox
 
             # return True, bbox
-
-    def bbox_to_pos(self, initial_bbox):
-        """
-        Convert bounding box format from a tuple format containing
-        xmin, ymin, width, and height to a tuple of two arrays which contain
-        the x and y coordinates of the center of the box and its width and
-        height respectively.
-        """
-        xmin, ymin, w, h = initial_bbox
-        cx = int(xmin + w/2)
-        cy = int(ymin + h/2)
-        target_pos = np.array([cx, cy])
-        target_sz  = np.array([w, h])
-
-        return target_pos, target_sz
-
-    def pos_to_bbox(self, target_pos, target_sz):
-        """
-        Invert the bounding box format produced in the above conversion
-        function.
-        """
-        w = target_sz[0]
-        h = target_sz[1]
-        xmin = int(target_pos[0] - w/2)
-        ymin = int(target_pos[1] - h/2)
-
-        return xmin, ymin, w, h
