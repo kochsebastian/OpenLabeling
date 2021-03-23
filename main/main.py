@@ -55,20 +55,25 @@ parser.add_argument('-n', '--n_frames', default='10000000', type=int, help='numb
 parser.add_argument('--detector', default='EfficientDet', type=str, help='Detector checkpoint dir')
 args = parser.parse_args()
 
+detector = None
 
-if args.detector == "EfficientDet":
-    from efficientdet import EfficientDet
+try:
+    import_detector = 'from ' + args.detector.lower() + ' import ' + args.detector
+    exec(import_detector)
     detector = EfficientDet()
-else:
-    raise NotImplementedError
+except Exception:
+    print('---> No detector found!')
 
 TRACKER_TYPE = "MIL"
-if args.tracker == "SiamMask":
-    from siammask import SiamMask as Adv_Tracker
+
+try:
+    import_tracker = 'from ' + args.tracker.lower() + ' import ' + args.tracker + ' as Adv_Tracker'
+    exec(import_tracker)
     TRACKER_TYPE = 'Adv_Tracker'
-elif False:
-    TRACKER_TYPE = 'Adv_Tracker'
-    raise NotImplementedError
+
+except Exception:
+    TRACKER_TYPE = "MIL"
+    print('---> Tracker not found using MIL tracker')
 
     
 
@@ -1402,7 +1407,7 @@ if __name__ == '__main__':
                             class_index = obj[-2]
                             color = class_rgb[class_index].tolist()
                             label_tracker.start_tracker(json_file_data, json_file_path, img_path, obj, color, annotation_formats)
-            elif pressed_key == ord('o'):
+            elif pressed_key == ord('o') and detector != None:
                 
                 confidences, classIds, boxes = detector.detect(img, conf=0.4) # boxes are xmin ymin xmax ymax
           

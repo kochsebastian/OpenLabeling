@@ -87,18 +87,23 @@ point_1 = (-1, -1)
 point_2 = (-1, -1)
 
 
-if args.detector == "EfficientDet":
+detector = None
+try:
+    import_detector = 'from ' + args.detector.lower() + ' import ' + args.detector
+    exec(import_detector)
     detector = EfficientDet()
-else:
-    raise NotImplementedError
+except Exception:
+    raise Exception('No detector found')
 
 TRACKER_TYPE = "MIL"
-if args.tracker == "SiamMask":
+try:
+    import_tracker = 'from ' + args.tracker.lower() + ' import ' + args.tracker + ' as Adv_Tracker'
+    exec(import_tracker)
     TRACKER_TYPE = 'Adv_Tracker'
-    from siammask import SiamMask as Adv_Tracker
-elif:
-    TRACKER_TYPE = 'Adv_Tracker'
-    raise NotImplementedError
+
+except Exception:
+    TRACKER_TYPE = "MIL"
+    print('---> Tracker not found using MIL tracker')
 
 def display_text(text, time):
     if WITH_QT:
