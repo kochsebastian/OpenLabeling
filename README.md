@@ -21,9 +21,10 @@ This is a more advanced version of OpenLabeling. Improvements include a build in
 
 - [Quick start](#quick-start)
 - [Prerequisites](#prerequisites)
-- [Run project](#run-project)
+- [Run labeling](#run-labeling)
 - [GUI usage](#gui-usage)
-- [Authors](#authors)
+- [Integrate your own Detector and Tracker](#integrate-your-own-detector-and-tracker) 
+- [Original Repo](#original-Repo)
 
 ## Quick start
 
@@ -32,12 +33,12 @@ git clone --recurse-submodules git@github.com:kochsebastian/AutoLabeling.git
 conda install --yes --file requirements.txt
 ```
 
-### Prerequisites
+## Prerequisites
 
-#### Detector:   
+### Detector:   
 The detector models are already provided in the EfficientDet submodule
 
-#### Tracker:
+### Tracker:
 
 Download siamrpn_r50_l234_dwxcorr model from 
 [Google Drive](https://drive.google.com/drive/folders/1rkj6UHyNSUUtwi7FwTSqCAVxgESS6S3_?usp=sharing) and put it into 
@@ -45,7 +46,7 @@ Download siamrpn_r50_l234_dwxcorr model from
 object_detection/pysot/experiments/
 ```
 
-    
+## Run labeling 
 ### Run manual mode
 
   1. Navigate to `main/` 
@@ -82,8 +83,7 @@ object_detection/pysot/experiments/
           --detector detector_type    detector_type being used: ['EfficentDet']
 
 
-
-### GUI usage
+## GUI usage
 
 Keyboard, press: 
 
@@ -118,7 +118,13 @@ Mouse:
   - Use *X* to remove this and all the bounding boxes in the following frames with the same id
   - Click the green box to make the object non-trackable 
 
+## Integrate your own Detector and Tracker
+The current detector is an EfficentDet trained on COCO for demonstration purposes. When labeling your own dataset you can either:
+* Train the EfficentDet on your dataset 
+* Use your own Model 
 
+If you want use your own model you have to implement a Communicator class for your detector which implements the detect method. (See efficientdet.py for guidance) To use the detector the file name must be the class name in lowercase and the class name must be the argument name which you use in the script.   
+The same procedure must be followed for a custom tracker
 
 ## Original Repo
 
