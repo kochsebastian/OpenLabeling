@@ -75,11 +75,7 @@ except Exception:
     TRACKER_TYPE = "MIL"
     print('---> Tracker not found using MIL tracker')
 
-    
-
-
-
-
+ 
 class_index = 0
 img_index = 0
 img = None
@@ -94,9 +90,6 @@ OUTPUT_DIR = args.output_dir
 N_FRAMES   = args.n_frames
 
 
-    
-
-
 WINDOW_NAME    = 'OpenLabeling'
 TRACKBAR_IMG   = 'Image'
 TRACKBAR_CLASS = 'Class'
@@ -109,8 +102,9 @@ labeling_file_dir = None
 curr_anchor_id = 0
 
 # selected bounding box
-prev_was_double_click = False
+prev_was_l_double_click = False
 prev_was_triple_click = False
+prev_was_r_double_click = False
 is_bbox_selected = False
 selected_bbox = -1
 LINE_THICKNESS = args.thickness
@@ -188,6 +182,12 @@ class dragBBox:
             dragBBox.selected_object = obj
 
     @staticmethod
+    def handler_right_mouse_down(eX, eY, obj):
+        dragBBox.check_point_inside_resizing_anchors(eX, eY, obj)
+        if dragBBox.anchor_being_dragged is not None:
+            dragBBox.selected_object = obj
+
+    @staticmethod
     def handler_mouse_move(eX, eY):
         if dragBBox.selected_object is not None:
             anchor_id, x_left, y_top, x_right, y_bottom,class_id,class_name= dragBBox.selected_object
@@ -232,6 +232,12 @@ class dragBBox:
         if dragBBox.selected_object is not None:
             dragBBox.selected_object = None
             dragBBox.anchor_being_dragged = None
+    
+    @staticmethod
+    def handler_right_mouse_up(eX, eY):
+        if dragBBox.selected_object is not None:
+            dragBBox.selected_object = None
+            dragBBox.anchor_being_dragged = None
 
 def display_text(text, time):
     if WITH_QT:
@@ -257,16 +263,6 @@ def set_class_index(x):
     class_index = x
     text = 'Selected class {}/{} -> {}'.format(str(class_index), str(last_class_index), CLASS_LIST[class_index])
     display_text(text, 3000)
-
-
-def draw_edges(tmp_img):
-    blur = cv2.bilateralFilter(tmp_img, 3, 75, 75)
-    edges = cv2.Canny(blur, 150, 250, 3)
-    edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
-    # Overlap image and edges together
-    tmp_img = np.bitwise_or(tmp_img, edges)
-    #tmp_img = cv2.addWeighted(tmp_img, 1 - edges_val, edges, edges_val, 0)
-    return tmp_img
 
 
 def decrease_index(current_index, last_index):
@@ -394,6 +390,15 @@ def get_bbox_area(x1, y1, x2, y2):
     height = abs(y2 - y1)
     return width*height
 
+def iou_bbox(obj1,obj2):
+    # obj: x,y,x2,y2
+    SA=(obj1[0]-obj1[2])*(obj1[1]-obj1[3])
+    SB=(obj2[0]-obj2[2])*(obj2[1]-obj2[3])
+    SI=(max(0,-(max(obj1[0],obj2[0])-min(obj1[2],obj2[2])))) * (max(0,-(max(obj1[1],obj2[1])-min(obj1[3],obj2[3]))))
+
+    SU = SA+SB-SI
+
+    return SI/SU
 
 def set_selected_bbox(set_class):
     global is_bbox_selected, selected_bbox
@@ -613,20 +618,21 @@ def edit_bbox(obj_to_edit, action):
 def mouse_listener(event, x, y, flags, param):
     try:
         # mouse callback function
-        global is_bbox_selected, prev_was_double_click, prev_was_triple_click, mouse_x, mouse_y, point_1, point_2
-
+        global is_bbox_selected, prev_was_l_double_click, prev_was_r_double_click, mouse_x, mouse_y, point_1, point_2
         set_class = True
         if event == cv2.EVENT_MOUSEMOVE:
             mouse_x = x
             mouse_y = y
         elif event == cv2.EVENT_LBUTTONDBLCLK:
-            prev_was_double_click = True
+            prev_was_l_double_click = True
             #print('Double click')
             point_1 = (-1, -1)
             # if clicked inside a bounding box we set that bbox
             set_selected_bbox(set_class)
-        # By AlexeyGy: delete via right-click
-        elif event == cv2.EVENT_RBUTTONDOWN:
+
+        elif event == cv2.EVENT_RBUTTONDBLCLK:
+            # key = cv2.waitKey(DELAY)
+            # if key == ord('y'):
             set_class = False
             set_selected_bbox(set_class)
             if is_bbox_selected:
@@ -636,9 +642,12 @@ def mouse_listener(event, x, y, flags, param):
                 #     print('remove with r')
                 edit_bbox(obj_to_edit, 'delete')
                 is_bbox_selected = False
+
         elif event == cv2.EVENT_MBUTTONDOWN:
             
+            
             if is_bbox_selected:
+                
                 c_id, x1,y1,x2,y2,_,_= img_objects[selected_bbox]
                 if pointInRect(x,y,x1,y1,x2,y2):
                     root = tk.Tk()
@@ -650,28 +659,38 @@ def mouse_listener(event, x, y, flags, param):
                     # print("TrackId", USER_INP)
                     root.destroy()
 
+        # elif event == cv2.EVENT_LBUTTONDOWN:
+        #     if prev_was_l_double_click:
+        #         #print('Finish double click')
+        #         prev_was_l_double_click = False
+        #     else:
+        #         threshold = 5
+        #         if abs(x - point_1[0]) > threshold or abs(y - point_1[1]) > threshold:
+        #             # second click
+        #             point_2 = (x, y)
 
         elif event == cv2.EVENT_LBUTTONDOWN:
-           
-            if prev_was_double_click:
+            if prev_was_l_double_click:
                 #print('Finish double click')
-                prev_was_double_click = False
-                prev_was_triple_click = True
+                prev_was_l_double_click = False
             else:
+                
                 #print('Normal left click')
 
                 # Check if mouse inside on of resizing anchors of the selected bbox
-                if is_bbox_selected:
-                    dragBBox.handler_left_mouse_down(x, y, img_objects[selected_bbox])
 
                 if dragBBox.anchor_being_dragged is None:
                     if point_1[0] == -1:
                         if is_bbox_selected:
+                            
+                            # key = None
+                            # if key == ord('y'):
                             if is_mouse_inside_delete_button():
                                 # set_selected_bbox(set_class)
                                 obj_to_edit = img_objects[selected_bbox]
                                 edit_bbox(obj_to_edit, 'delete_recursive')
-                            if is_mouse_inside_tracked_button():
+                            if cv2.EVENT_FLAG_CTRLKEY:
+                            # if is_mouse_inside_tracked_button():
                                 obj_to_edit = img_objects[selected_bbox]
                                 if obj_to_edit  in object_list:
                                     if obj_to_edit in redo_tracking_objects:
@@ -684,7 +703,6 @@ def mouse_listener(event, x, y, flags, param):
                             is_bbox_selected = False
                         else:
                             # first click (start drawing a bounding box or delete an item)
-
                             point_1 = (x, y)
                     else:
                         # minimal size for bounding box to avoid errors
@@ -696,6 +714,25 @@ def mouse_listener(event, x, y, flags, param):
         elif event == cv2.EVENT_LBUTTONUP:
             if dragBBox.anchor_being_dragged is not None:
                 dragBBox.handler_left_mouse_up(x, y)
+
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            if prev_was_r_double_click:
+                #print('Finish double click')
+                prev_was_r_double_click = False
+            else:
+                #print('Normal left click')
+
+                # Check if mouse inside on of resizing anchors of the selected bbox
+                if is_bbox_selected:
+                    dragBBox.handler_right_mouse_down(x, y, img_objects[selected_bbox])
+
+     
+                    
+
+        elif event == cv2.EVENT_RBUTTONUP:
+            if dragBBox.anchor_being_dragged is not None:
+                dragBBox.handler_right_mouse_up(x, y)
+
     except Exception:
         print("Unexpected error:", sys.exc_info()[0])
         pass
@@ -787,18 +824,6 @@ def convert_video_to_images(video_path, n_frames, desired_img_format):
     return file_path, video_name_ext
 
 
-def overlap_percent_bbox(obj1,obj2):
-    # obj1 = obj[1:5]
-    # obj2 = obj_[1:5]
-    SA=(obj1[0]-obj1[2])*(obj1[1]-obj1[3])
-    SB=(obj2[0]-obj2[2])*(obj2[1]-obj2[3])
-    SI=(max(0,-(max(obj1[0],obj2[0])-min(obj1[2],obj2[2])))) * (max(0,-(max(obj1[1],obj2[1])-min(obj1[3],obj2[3]))))
-    # A_overlap=(max(obj1[0],obj2[0])-min(obj1[2],obj2[2]))*(max(obj1[1],obj2[1])-min(obj1[3],obj2[3]))
-    # p_overlap = abs(A_overlap/(A1+A2-A_overlap))
-    # p_overlap = abs(A_overlap/A1)
-    SU = SA+SB-SI
-
-    return SI/SU
 
 def get_annotation_paths(img_path, annotation_formats):
     annotation_paths = []
@@ -1192,7 +1217,7 @@ if __name__ == '__main__':
     # The colors are in BGR order because we're using OpenCV
     class_rgb = [
         (0, 0, 255), (255, 0, 0), (0, 255, 0), (255, 255, 0), (0, 255, 255),
-        (255, 0, 255), (192, 192, 192), (128, 128, 128), (128, 0, 0),
+        (255, 0, 255), (128, 128, 128), (128, 0, 0),
         (128, 128, 0), (0, 128, 0), (128, 0, 128), (0, 128, 128), (0, 0, 128)]
     class_rgb = np.array(class_rgb)
     # If there are still more classes, add new colors randomly
@@ -1251,12 +1276,16 @@ if __name__ == '__main__':
 
         object_list = img_objects[:]
         for o in object_list:
-            x1_c, y1_c, x2_c, y2_c=get_tracked_icon(*o[1:5])
-            tmp_img = draw_tracked_icon_grey(tmp_img,x1_c, y1_c, x2_c, y2_c)
+            x,y,x2,y2 = o[1:5]
+            cv2.rectangle(tmp_img, (x,y),(x2,y2),(169,169,169),args.thickness+5)
+            # x1_c, y1_c, x2_c, y2_c=get_tracked_icon(*o[1:5])
+            # tmp_img = draw_tracked_icon_grey(tmp_img,x1_c, y1_c, x2_c, y2_c)
         object_list = remove_already_tracked_objects(object_list, img_path, current_data)
         for o in object_list:
-            x1_c, y1_c, x2_c, y2_c=get_tracked_icon(*o[1:5])
-            tmp_img = draw_tracked_icon(tmp_img,x1_c, y1_c, x2_c, y2_c)
+            # x1_c, y1_c, x2_c, y2_c=get_tracked_icon(*o[1:5])
+            # tmp_img = draw_tracked_icon(tmp_img,x1_c, y1_c, x2_c, y2_c)
+            x,y,x2,y2 = o[1:5]
+            cv2.rectangle(tmp_img, (x,y),(x2,y2),(50,205,50),args.thickness+5)
 
   
 
@@ -1343,7 +1372,7 @@ if __name__ == '__main__':
             #         save_darklabel_txt(labeling_file_dir)
 
 
-            elif pressed_key == ord('m'):
+            elif pressed_key == ord('l'):
                 current_img_path = IMAGE_PATH_LIST[img_index]
               
                 is_from_video, video_name = is_frame_from_video(current_img_path)
@@ -1368,19 +1397,7 @@ if __name__ == '__main__':
                     json_file_path = '{}.json'.format(os.path.join(TRACKER_DIR, CURR_VIDEO_NAME))
                     file_exists, current_data = get_json_file_data(json_file_path)
 
-                    # if file_exists:
-                    #     object_list = remove_already_tracked_objects(object_list, img_path, current_data)
-                    #     for o in object_list:
-                    #         x1_c, y1_c, x2_c, y2_c=get_tracked_icon(o[0],o[1],o[2],o[3])
-                    #         tmp_img = draw_tracked_icon(tmp_img,x1_c, y1_c, x2_c, y2_c)
-
-            elif pressed_key == ord('e'):
-                if edges_on == True:
-                    edges_on = False
-                    display_text('Edges turned OFF!', 1000)
-                else:
-                    edges_on = True
-                    display_text('Edges turned ON!', 1000)
+              
             elif pressed_key == ord('p'):
                 # check if the image is a frame from a video
                 is_from_video, video_name = is_frame_from_video(img_path)
@@ -1410,17 +1427,25 @@ if __name__ == '__main__':
             elif pressed_key == ord('o') and detector != None:
                 
                 confidences, classIds, boxes = detector.detect(img, conf=0.4) # boxes are xmin ymin xmax ymax
-          
-
-
                 if  len(boxes)>0:
-                    # object_list=img_objects[:]
+                    object_list=img_objects[:]
                     for box,class_index in zip(boxes,classIds):
-                        update_bounding_box(img_path,curr_anchor_id,int(class_index),int(box[0]),int(box[1]),(int(box[0]) + int(box[2])),(int(box[1]) + int(box[3])))
-                        curr_anchor_id+=1
+                        overlap = False
+                        b_x1,b_y1,w,h = [int(a)  for a in box[0:4]]
+                        b_x2 = b_x1+w
+                        b_y2 = b_y1+h
+                        for img_box in object_list:
+                            x1,y1,x2,y2 = [int(a) for a in img_box[1:5]]
+                            if  ((class_index== img_box[-2] and iou_bbox([b_x1, b_y1, b_x2, b_y2],[x1, y1, x2, y2]) > 0.1)
+                                    or iou_bbox([b_x1, b_y1, b_x2, b_y2],[x1, y1, x2,y2]) > 0.1):
+                                overlap=True
+                        if overlap == False:
+                            update_bounding_box(img_path,curr_anchor_id,int(class_index),int(box[0]),int(box[1]),(int(box[0]) + int(box[2])),(int(box[1]) + int(box[3])))
+                            curr_anchor_id+=1
                 save_darklabel_txt(labeling_file_dir)
 
             elif pressed_key == ord(' '):
+                # print('save')
                 current_img_path = IMAGE_PATH_LIST[img_index]
               
                 is_from_video, video_name = is_frame_from_video(current_img_path)

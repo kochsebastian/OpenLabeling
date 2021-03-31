@@ -86,6 +86,7 @@ mouse_y = 0
 point_1 = (-1, -1)
 point_2 = (-1, -1)
 
+IOU_TRESH = 0.1
 
 detector = None
 try:
@@ -150,7 +151,7 @@ def decrease_index(current_index, last_index):
 def increase_index(current_index, last_index):
     global is_last_frame
     current_index += 1
-    if current_index > last_index:
+    if current_index >= last_index:
         current_index = 0
         is_last_frame = True
     return current_index
@@ -437,7 +438,7 @@ def get_json_object_dict_percent(obj, json_object_list):
         obj.append(class_name)
         for d in json_object_list:
                     if ( d['class_index'] == class_index and
-                         overlap_percent(obj,d))>0.1 :
+                         iou_percent(obj,d)) > IOU_TRESH :
                         return d
     return None
 
@@ -454,7 +455,7 @@ def remove_already_tracked_objects(object_list, img_path, json_file_data):
             # json_object_list.remove(obj_dict)
     return object_list
 
-def overlap_percent(obj,json_obj2):
+def iou_percent(obj,json_obj2):
     obj1 = obj[1:5]
     obj2 = [json_obj2['bbox']['xmin'],json_obj2['bbox']['ymin'],json_obj2['bbox']['xmax'],json_obj2['bbox']['ymax']]
     SA=(obj1[0]-obj1[2])*(obj1[1]-obj1[3])
@@ -467,57 +468,16 @@ def overlap_percent(obj,json_obj2):
 
     return SI/SU
 
-def overlap_percent_bbox(obj1,obj2):
-    # obj1 = obj[1:5]
-    # obj2 = obj_[1:5]
+def iou_bbox(obj1,obj2):
+    # obj: x,y,x2,y2
     SA=(obj1[0]-obj1[2])*(obj1[1]-obj1[3])
     SB=(obj2[0]-obj2[2])*(obj2[1]-obj2[3])
     SI=(max(0,-(max(obj1[0],obj2[0])-min(obj1[2],obj2[2])))) * (max(0,-(max(obj1[1],obj2[1])-min(obj1[3],obj2[3]))))
-    # A_overlap=(max(obj1[0],obj2[0])-min(obj1[2],obj2[2]))*(max(obj1[1],obj2[1])-min(obj1[3],obj2[3]))
-    # p_overlap = abs(A_overlap/(A1+A2-A_overlap))
-    # p_overlap = abs(A_overlap/A1)
+
     SU = SA+SB-SI
 
     return SI/SU
 
-def get_iou(obj1,obj2):
-    """
-    Calculate the Intersection over Union (IoU) of two bounding boxes.
-
-    Returns
-    -------
-    float
-        in [0, 1]
-    """
-    assert bb1['x1'] < bb1['x2']
-    assert bb1['y1'] < bb1['y2']
-    assert bb2['x1'] < bb2['x2']
-    assert bb2['y1'] < bb2['y2']
-
-    # determine the coordinates of the intersection rectangle
-    x_left = max(bb1['x1'], bb2['x1'])
-    y_top = max(bb1['y1'], bb2['y1'])
-    x_right = min(bb1['x2'], bb2['x2'])
-    y_bottom = min(bb1['y2'], bb2['y2'])
-
-    if x_right < x_left or y_bottom < y_top:
-        return 0.0
-
-    # The intersection of two axis-aligned bounding boxes is always an
-    # axis-aligned bounding box
-    intersection_area = (x_right - x_left) * (y_bottom - y_top)
-
-    # compute the area of both AABBs
-    bb1_area = (bb1['x2'] - bb1['x1']) * (bb1['y2'] - bb1['y1'])
-    bb2_area = (bb2['x2'] - bb2['x1']) * (bb2['y2'] - bb2['y1'])
-
-    # compute the intersection over union by taking the intersection
-    # area and dividing it by the sum of prediction + ground-truth
-    # areas - the interesection area
-    iou = intersection_area / float(bb1_area + bb2_area - intersection_area)
-    assert iou >= 0.0
-    assert iou <= 1.0
-    return iou
 
 def get_json_file_object_by_id(json_object_list, anchor_id):
     for obj_dict in json_object_list:
@@ -879,23 +839,12 @@ display_text('Welcome!\n Press [h] for help.', 4000)
 new_track = False
 print(datetime.now())
 while True:
-    if img_index >= last_index:
-        is_last_frame = True
 
-    if is_last_frame and new_track:
-        print("Reach to the last frame!!!!")
-        new_track = False
-        is_last_frame = False
-        # set_img_index(0)
-        # continue
+
+    if is_last_frame or img_index >= last_index:
         print(datetime.now())
-
         break
-    elif is_last_frame:
-        print("Reach to the last frame!!!!")
-        print(datetime.now())
 
-        break
 
     color = class_rgb[class_index].tolist()
     # clone the img
@@ -926,42 +875,9 @@ while True:
     #   2.1 In TrackerManager, if detect there is any miss detection of any tracker, then comeback to Step 1.
     """
 
-    # Using object detection to find PEOPLE
-    print("Using Detector!!!!")
-    im_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    # boxes, confidences, classIds =  detector.detect(im_rgb)
-    height, width = im_rgb.shape[:2]
-    image = im_rgb.astype(np.float32) / 255
-    image[:, :, 0] = (image[:, :, 0] - 0.485) / 0.229
-    image[:, :, 1] = (image[:, :, 1] - 0.456) / 0.224
-    image[:, :, 2] = (image[:, :, 2] - 0.406) / 0.225
-    if height > width:
-        scale = image_size / height
-        resized_height = image_size
-        resized_width = int(width * scale)
-    else:
-        scale = image_size / width
-        resized_height = int(height * scale)
-        resized_width = image_size
-
-    image = cv2.resize(image, (resized_width, resized_height))
-
-    new_image = np.zeros((image_size, image_size, 3))
-    new_image[0:resized_height, 0:resized_width] = image
-    new_image = np.transpose(new_image, (2, 0, 1))
-    new_image = new_image[None, :, :, :]
-    new_image = torch.Tensor(new_image)
-    if torch.cuda.is_available():
-        new_image = new_image.cuda()
-    with torch.no_grad():
-        confidences, classIds, boxes = detector(new_image) # boxes are xmin ymin xmax ymax
-        boxes /= scale
-    boxes[:,2]=boxes[:,2]-boxes[:,0] # we need x y w h
-    boxes[:,3]=boxes[:,3]-boxes[:,1]
-    boxes=boxes[confidences>0.4].cpu() 
-    classIds=classIds[confidences>0.4].cpu()
-    confidences=confidences[confidences>0.4].cpu()
-
+    
+    confidences, classIds, boxes = detector.detect(img,conf=0.6) # boxes are xmin ymin xmax ymax
+       
 
     # new_boxes = boxes[:,:]
 
@@ -979,11 +895,16 @@ while True:
         object_list=img_objects[:]
         for box,index in zip(boxes,classIds):
             overlap = False
+            b_x1,b_y1,w,h = [int(a)  for a in box[0:4]]
+            b_x2 = b_x1+w
+            b_y2 = b_y1+h
             for img_box in object_list:
-                if  index== img_box[-2] and overlap_percent_bbox([int(box[0]),int(box[1]), (int(box[0]) + int(box[2])),(int(box[1]) + int(box[3]))],[int(img_box[1]),int(img_box[2]), int(img_box[3]),int(img_box[4])])>0.5:
+                x1,y1,x2,y2 = [int(a) for a in img_box[1:5]]
+                if  ((index== img_box[-2] and iou_bbox([b_x1, b_y1, b_x2, b_y2],[x1, y1, x2, y2]) > IOU_TRESH)
+                        or iou_bbox([b_x1, b_y1, b_x2, b_y2],[x1, y1, x2,y2]) > 0.1):
                     overlap=True
             if overlap == False:
-                object_list.append([999,int(box[0]),int(box[1]), (int(box[0]) + int(box[2])),(int(box[1]) + int(box[3])),int(index),CLASS_LIST[index]])
+                object_list.append([999,b_x1,b_y1, b_x2, b_y2,int(index),CLASS_LIST[index]])
         current_img_path = IMAGE_PATH_LIST[img_index]
         is_from_video, video_name = is_frame_from_video(current_img_path)
 
